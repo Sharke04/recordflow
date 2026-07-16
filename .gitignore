@@ -1,0 +1,20 @@
+# Build output
+/build/
+/out/
+*.o
+*.obj
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Editor
+.vscode/
+.idea/
+.cache/
+
+# Local env / secrets
+.env
+recordflow.conf

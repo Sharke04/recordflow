@@ -1,0 +1,12 @@
+# recordflow.conf — source PostgreSQL connection for Recordflow.
+#
+# Copy this file to `recordflow.conf` and fill in real values. Each key below is
+# passed verbatim to libpq as a connection keyword, so any libpq keyword is
+# valid (sslmode, connect_timeout, ...):
+# https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS
+
+host=localhost
+port=5432
+dbname=mydb
+user=cdc
+password=changeme
