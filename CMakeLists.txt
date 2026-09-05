@@ -26,7 +26,7 @@ find_package(PostgreSQL REQUIRED)
 # --- Library: the reusable CDC core -----------------------------------------
 add_library(recordflow_core
     src/config.cpp
-    src/pg/pgoutput_parser.cpp
+    src/pg/parser/pgoutput_parser.cpp
     src/pg/replication_stream.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
