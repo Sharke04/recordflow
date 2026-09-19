@@ -12,6 +12,7 @@
 
 #include "config.hpp"
 #include "pg/parser/pgoutput_parser.hpp"
+#include "pg/wire.hpp"
 
 namespace {
 
@@ -49,7 +50,7 @@ void send_standby_status(PGconn* conn, std::uint64_t lsn) {
     constexpr std::uint64_t kNoClientTime = 0;
     constexpr std::uint8_t kNoReplyRequested = 0;
 
-    pgoutput::ByteWriter msg;
+    pgwire::ByteWriter msg;
     msg.put('r')
        .putLong(lsn)
        .putLong(lsn)
@@ -91,7 +92,7 @@ int run_stream(PGconn* conn) {
         }
 
         try {
-            pgoutput::ByteCursor frame(buf.data, static_cast<std::size_t>(len));
+            pgwire::ByteCursor frame(buf.data, static_cast<std::size_t>(len));
             switch (frame.get()) {
                 case 'w': {
                     frame.getLong();
