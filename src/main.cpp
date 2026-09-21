@@ -1,4 +1,4 @@
-#include "pg/replication_stream.hpp"
+#include "stream/replication_stream.hpp"
 
 #include <cstdio>
 

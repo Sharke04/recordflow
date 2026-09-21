@@ -1,4 +1,4 @@
-#include "pg/parser/pgoutput_parser.hpp"
+#include "stream/parser/pgoutput_parser.hpp"
 
 #include <chrono>
 #include <cstdio>
