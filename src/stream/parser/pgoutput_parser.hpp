@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "pg/wire.hpp"
+#include "stream/wire.hpp"
 
 namespace pgoutput {
 

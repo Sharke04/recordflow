@@ -1,12 +1,14 @@
-# recordflow.conf — source PostgreSQL connection for Recordflow.
-#
-# Copy this file to `recordflow.conf` and fill in real values. Each key below is
-# passed verbatim to libpq as a connection keyword, so any libpq keyword is
-# valid (sslmode, connect_timeout, ...):
-# https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS
-
 host=localhost
 port=5432
 dbname=mydb
 user=cdc
 password=changeme
+
+sink.topic=recordflow.changes
+
+kafka.bootstrap.servers=localhost:9092
+kafka.acks=all
+kafka.enable.idempotence=true
+kafka.linger.ms=5
+kafka.compression.type=lz4
+kafka.queue.buffering.max.messages=100000

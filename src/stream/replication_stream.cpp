@@ -1,4 +1,4 @@
-#include "pg/replication_stream.hpp"
+#include "stream/replication_stream.hpp"
 
 #include <libpq-fe.h>
 
@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "config.hpp"
-#include "pg/parser/pgoutput_parser.hpp"
-#include "pg/wire.hpp"
+#include "stream/parser/pgoutput_parser.hpp"
+#include "stream/wire.hpp"
 
 namespace {
 
@@ -131,7 +131,7 @@ int run_stream(PGconn* conn) {
 }
 
 int stream(const std::string& slot, const std::string& publication) {
-    SourceConfig config;
+    Config config;
     try {
         config = load_config();
     } catch (const std::exception& e) {
@@ -139,7 +139,7 @@ int stream(const std::string& slot, const std::string& publication) {
         return 1;
     }
 
-    PGconn* conn = connect_replication(std::move(config));
+    PGconn* conn = connect_replication(std::move(config.source));
     if (PQstatus(conn) != CONNECTION_OK) {
         std::fprintf(stderr, "connection failed: %s", PQerrorMessage(conn));
         PQfinish(conn);
