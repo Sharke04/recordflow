@@ -11,9 +11,6 @@ namespace pgoutput {
 
 namespace {
 
-// Seeds an event with everything the relation cache knows about the table. The
-// key columns are copied out here because the R message is the only place they
-// are ever announced.
 ChangeEvent event_for(Op op, const TableInfo& rel) {
     ChangeEvent event;
     event.op = op;
@@ -29,7 +26,7 @@ ChangeEvent event_for(Op op, const TableInfo& rel) {
 
 }
 
-TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteCursor& buf) const {
+TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteReader& buf) const {
     buf.get();
     TableInfo t;
     t.oid = static_cast<std::uint32_t>(buf.getInt());
@@ -49,7 +46,7 @@ TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteCursor& buf) const {
     return t;
 }
 
-ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
@@ -58,7 +55,7 @@ ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteCursor& buf, const Table
     return event;
 }
 
-ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     ChangeEvent event = event_for(Op::Update, rel);
@@ -71,7 +68,7 @@ ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteCursor& buf, const Table
     return event;
 }
 
-ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
@@ -80,7 +77,7 @@ ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteCursor& buf, const Table
     return event;
 }
 
-Row WalMessageDecoder::decodeTuple(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+Row WalMessageDecoder::decodeTuple(pgwire::ByteReader& buf, const TableInfo& rel) const {
     const std::int16_t ncols = buf.getShort();
     Row row;
     if (ncols > 0) row.reserve(static_cast<std::size_t>(ncols));
@@ -135,23 +132,6 @@ const char* replica_identity_name(char c) {
     }
 }
 
-std::string format_row(const Row& row) {
-    std::string s = "(";
-    s.reserve(row.size() * 16 + 2);
-    for (std::size_t i = 0; i < row.size(); ++i) {
-        if (i) s += ", ";
-        s += row[i].first;
-        s += '=';
-        switch (row[i].second.kind) {
-            case Value::Kind::Text: s += row[i].second.text; break;
-            case Value::Kind::UnchangedToast: s += "<unchanged>"; break;
-            case Value::Kind::Null: s += "NULL"; break;
-        }
-    }
-    s += ')';
-    return s;
-}
-
 }
 
 std::string PgoutputParser::relation_label(std::uint32_t oid) const {
@@ -168,7 +148,7 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
         return {};
     }
     try {
-        pgwire::ByteCursor buf(data, len);
+        pgwire::ByteReader buf(data, len);
         pgoutput::ParsedMessage parsed;
         const char type = decoder_.peekType(buf);
         parsed.type = type;
@@ -195,40 +175,21 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                 const auto it = relations_.find(oid);
                 const pgoutput::TableInfo& rel =
                     (it != relations_.end()) ? it->second : kUnknown;
-                const std::string label = relation_label(oid);
 
                 ChangeEvent event =
                     (type == 'I')   ? decoder_.decodeInsert(buf, rel)
                     : (type == 'U') ? decoder_.decodeUpdate(buf, rel)
                                     : decoder_.decodeDelete(buf, rel);
 
-                // No R message has been seen for this OID, so there are no
-                // column names to key on. Fall back to the OID as the table
-                // name, which at least keeps the events of one table together.
+                // No R message has been seen for this OID, so the table name
+                // is unknown. Fall back to the OID so the event still says
+                // which relation it came from.
                 if (rel.oid == 0) {
-                    event.table = label;
+                    event.table = relation_label(oid);
                 }
                 event.xid = transaction_.xid;
                 event.lsn = transaction_.lsn;
                 event.commit_ts = transaction_.commit_ts;
-
-                if (type == 'I') {
-                    std::printf("INSERT   %s %s\n", label.c_str(),
-                                format_row(*event.after).c_str());
-                } else if (type == 'U') {
-                    if (event.before) {
-                        std::printf("UPDATE   %s old=%s new=%s\n", label.c_str(),
-                                    format_row(*event.before).c_str(),
-                                    format_row(*event.after).c_str());
-                    } else {
-                        std::printf("UPDATE   %s new=%s\n", label.c_str(),
-                                    format_row(*event.after).c_str());
-                    }
-                } else {
-                    std::printf("DELETE   %s old=%s\n", label.c_str(),
-                                format_row(*event.before).c_str());
-                }
-
                 parsed.events.push_back(std::move(event));
                 break;
             }
@@ -259,14 +220,8 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                 buf.get();
                 const std::int32_t nrel = buf.getInt();
                 buf.get();
-                std::string list;
-                // One event per truncated relation, so each lands on the
-                // partition that carries the rest of that table's history.
                 for (std::int32_t i = 0; i < nrel; ++i) {
                     const auto oid = static_cast<std::uint32_t>(buf.getInt());
-                    const std::string label = relation_label(oid);
-                    if (i) list += ", ";
-                    list += label;
 
                     ChangeEvent event;
                     event.op = Op::Truncate;
@@ -275,14 +230,13 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                         event.schema = it->second.schema;
                         event.table = it->second.name;
                     } else {
-                        event.table = label;
+                        event.table = relation_label(oid);
                     }
                     event.xid = transaction_.xid;
                     event.lsn = transaction_.lsn;
                     event.commit_ts = transaction_.commit_ts;
                     parsed.events.push_back(std::move(event));
                 }
-                std::printf("TRUNCATE %s\n", list.c_str());
                 break;
             }
             case 'O':

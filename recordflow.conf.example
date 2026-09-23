@@ -3,12 +3,3 @@ port=5432
 dbname=mydb
 user=cdc
 password=changeme
-
-sink.topic=recordflow.changes
-
-kafka.bootstrap.servers=localhost:9092
-kafka.acks=all
-kafka.enable.idempotence=true
-kafka.linger.ms=5
-kafka.compression.type=lz4
-kafka.queue.buffering.max.messages=100000
