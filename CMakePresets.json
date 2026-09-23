@@ -15,7 +15,7 @@
       "name": "ucrt64",
       "inherits": "base",
       "displayName": "MSYS2 UCRT64 (Ninja)",
-      "description": "Build with the UCRT64 GCC toolchain. Needs mingw-w64-ucrt-x86_64-postgresql and mingw-w64-ucrt-x86_64-librdkafka.",
+      "description": "Build with the UCRT64 GCC toolchain. Needs mingw-w64-ucrt-x86_64-postgresql.",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -31,7 +31,7 @@
       "name": "macos",
       "inherits": "base",
       "displayName": "macOS (Homebrew, Apple Silicon)",
-      "description": "Build against Homebrew libpq and librdkafka. Needs `brew install libpq librdkafka`.",
+      "description": "Build against Homebrew libpq. Needs `brew install libpq`.",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
