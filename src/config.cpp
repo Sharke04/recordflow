@@ -48,10 +48,10 @@ Config load_config(const std::string& path) {
             fail(path, line_no, "empty key");
         }
         const std::string_view value = trim(trimmed.substr(eq + 1));
-        config.source.params.emplace_back(key, value);
+        config.params.emplace_back(key, value);
     }
 
-    if (config.source.params.empty()) {
+    if (config.params.empty()) {
         throw std::runtime_error("no connection parameters in config file: " +
                                  path);
     }
