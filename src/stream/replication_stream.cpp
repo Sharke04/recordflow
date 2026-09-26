@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <exception>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -18,23 +17,28 @@
 
 namespace {
 
-bool has_param(const SourceConfig& config, std::string_view keyword) {
-    return std::any_of(config.params.begin(), config.params.end(),
-                       [&](const auto& param) { return param.first == keyword; });
+bool has_param(const KeyValues& params, const std::string& keyword) {
+    for (const auto& param : params) {
+        if (param.first == keyword)
+            return true;
+    }
+    return false;
 }
 
-PGconn* connect_replication(SourceConfig config) {
-    config.params.emplace_back("replication", "database");
+PGconn* connect_replication(KeyValues params) {
+    // Open a logical replication connection, required for START_REPLICATION
+    params.emplace_back("replication", "database");
 
-    if (!has_param(config, "client_encoding")) {
-        config.params.emplace_back("client_encoding", "UTF8");
+    if (!has_param(params, "client_encoding")) {
+        params.emplace_back("client_encoding", "UTF8");
     }
 
     std::vector<const char*> keywords, values;
-    for (const auto& [keyword, value] : config.params) {
+    for (const auto& [keyword, value] : params) {
         keywords.push_back(keyword.c_str());
         values.push_back(value.c_str());
     }
+
     keywords.push_back(nullptr);
     values.push_back(nullptr);
 
@@ -49,10 +53,10 @@ bool start_replication(PGconn* conn, const std::string& slot,
 
     PGresult* res = PQexec(conn, command.c_str());
     const bool ok = res && PQresultStatus(res) == PGRES_COPY_BOTH;
-    if (!ok) {
-        std::fprintf(stderr, "could not start replication: %s",
-                     PQerrorMessage(conn));
-    }
+
+    if (!ok)
+        std::fprintf(stderr, "could not start replication: %s", PQerrorMessage(conn));
+
     PQclear(res);
     return ok;
 }
@@ -93,9 +97,14 @@ void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
     frame.getLong();
     const pgoutput::ParsedMessage msg =
         parser.handle_message(frame.rest(), frame.remaining());
+
+    if (msg.relation) {
+        print_relation(*msg.relation);
+    }
     for (const pgoutput::ChangeEvent& event : msg.events) {
         print_change_event(event);
     }
+
     if (msg.type == 'B') {
         state.in_transaction = true;
     } else if (msg.type == 'C') {
@@ -105,8 +114,7 @@ void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
     }
 }
 
-void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame,
-                      StreamState& state) {
+void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame, StreamState& state) {
     const auto wal_end = static_cast<std::uint64_t>(frame.getLong());
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
@@ -164,7 +172,7 @@ int stream(const std::string& slot, const std::string& publication) {
         return 1;
     }
 
-    PGconn* conn = connect_replication(std::move(config.source));
+    PGconn* conn = connect_replication(std::move(config.params));
     if (PQstatus(conn) != CONNECTION_OK) {
         std::fprintf(stderr, "connection failed: %s", PQerrorMessage(conn));
         PQfinish(conn);
@@ -174,12 +182,12 @@ int stream(const std::string& slot, const std::string& publication) {
                  "Connected; streaming from slot '%s' via publication '%s'.\n",
                  slot.c_str(), publication.c_str());
 
-    int rc = 1;
+    int exit_code = 1;
     if (start_replication(conn, slot, publication)) {
         std::fprintf(stderr, "Streaming (Ctrl+C to stop)...\n");
-        rc = run_stream(conn);
+        exit_code = run_stream(conn);
     }
 
     PQfinish(conn);
-    return rc;
+    return exit_code;
 }
