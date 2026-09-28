@@ -14,6 +14,7 @@ using namespace pgoutput;
 
 const char* op_name(Op op) {
     switch (op) {
+        case Op::Unknown:  return "?";
         case Op::Insert:   return "INSERT";
         case Op::Update:   return "UPDATE";
         case Op::Delete:   return "DELETE";
