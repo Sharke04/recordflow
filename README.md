@@ -19,7 +19,7 @@ Recordflow connects to a PostgreSQL source database in replication mode, issues 
 
 Two properties define the design:
 
-**The application creates zero database objects.** The publication, the replication slot, and the replica-identity settings are created out-of-band by you, via SQL. The only replication command Recordflow ever issues is `START_REPLICATION`; it never runs `CREATE_REPLICATION_SLOT` or `CREATE PUBLICATION`. That is what makes it safe to point at a database this service does not own. If the slot or publication is missing, it says so and exits rather than fixing the database for you.
+**The application creates zero database objects.** You create the publication and replication slot yourself; Recordflow only issues `START_REPLICATION`, which makes it safe to point at a database you don't own.
 
 **One connection, print-only.** A single `replication=database` connection carries the stream. Decoded events are printed to stdout, and the slot is advanced as they are, so each run resumes where the last one stopped.
 
