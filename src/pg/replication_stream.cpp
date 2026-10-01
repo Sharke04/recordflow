@@ -45,21 +45,17 @@ bool start_replication(PGconn* conn, const std::string& slot,
     return ok;
 }
 
-void put_be64(std::string& out, std::uint64_t v) {
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        out.push_back(static_cast<char>((v >> shift) & 0xFF));
-    }
-}
-
 void send_standby_status(PGconn* conn, std::uint64_t lsn) {
-    std::string msg;
-    msg.reserve(34);
-    msg.push_back('r');
-    put_be64(msg, lsn);
-    put_be64(msg, lsn);
-    put_be64(msg, lsn);
-    put_be64(msg, 0);
-    msg.push_back('\0');
+    constexpr std::uint64_t kNoClientTime = 0;
+    constexpr std::uint8_t kNoReplyRequested = 0;
+
+    pgoutput::ByteWriter msg;
+    msg.put('r')
+       .putLong(lsn)
+       .putLong(lsn)
+       .putLong(lsn)
+       .putLong(kNoClientTime)
+       .put(kNoReplyRequested);
 
     if (PQputCopyData(conn, msg.data(), static_cast<int>(msg.size())) < 0 ||
         PQflush(conn) < 0) {

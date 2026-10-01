@@ -109,6 +109,26 @@ private:
     std::size_t pos_ = 0;
 };
 
+class ByteWriter {
+public:
+    ByteWriter& put(std::uint8_t v) {
+        buf_.push_back(static_cast<char>(v));
+        return *this;
+    }
+    ByteWriter& putLong(std::uint64_t v) {
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            put(static_cast<std::uint8_t>(v >> shift));
+        }
+        return *this;
+    }
+
+    const char* data() const { return buf_.data(); }
+    std::size_t size() const { return buf_.size(); }
+
+private:
+    std::string buf_;
+};
+
 class WalMessageDecoder {
 public:
     char peekType(const ByteCursor& buf) const { return buf.typeAt(); }
