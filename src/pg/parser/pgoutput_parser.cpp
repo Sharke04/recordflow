@@ -9,7 +9,7 @@
 
 namespace pgoutput {
 
-TableInfo WalMessageDecoder::decodeRelation(ByteCursor& buf) const {
+TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteCursor& buf) const {
     buf.get();
     TableInfo t;
     t.oid = static_cast<std::uint32_t>(buf.getInt());
@@ -29,14 +29,14 @@ TableInfo WalMessageDecoder::decodeRelation(ByteCursor& buf) const {
     return t;
 }
 
-DecodedDml WalMessageDecoder::decodeInsert(ByteCursor& buf, const TableInfo& rel) const {
+DecodedDml WalMessageDecoder::decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
     return {std::nullopt, decodeTuple(buf, rel)};
 }
 
-DecodedDml WalMessageDecoder::decodeUpdate(ByteCursor& buf, const TableInfo& rel) const {
+DecodedDml WalMessageDecoder::decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     std::optional<Row> before;
@@ -48,14 +48,14 @@ DecodedDml WalMessageDecoder::decodeUpdate(ByteCursor& buf, const TableInfo& rel
     return {std::move(before), decodeTuple(buf, rel)};
 }
 
-DecodedDml WalMessageDecoder::decodeDelete(ByteCursor& buf, const TableInfo& rel) const {
+DecodedDml WalMessageDecoder::decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
     return {decodeTuple(buf, rel), std::nullopt};
 }
 
-Row WalMessageDecoder::decodeTuple(ByteCursor& buf, const TableInfo& rel) const {
+Row WalMessageDecoder::decodeTuple(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     const std::int16_t ncols = buf.getShort();
     Row row;
     if (ncols > 0) row.reserve(static_cast<std::size_t>(ncols));
@@ -143,7 +143,7 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
         return {};
     }
     try {
-        pgoutput::ByteCursor buf(data, len);
+        pgwire::ByteCursor buf(data, len);
         pgoutput::ParsedMessage parsed;
         const char type = decoder_.peekType(buf);
         parsed.type = type;
