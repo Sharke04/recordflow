@@ -3,17 +3,23 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
 
-std::string trim(const std::string& s) {
-    const auto first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
+constexpr std::string_view kWhitespace = " \t\r\n";
+
+std::string_view trim(std::string_view s) {
+    const auto first = s.find_first_not_of(kWhitespace);
+    if (first == std::string_view::npos) {
         return {};
     }
-    const auto last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
+    return s.substr(first, s.find_last_not_of(kWhitespace) - first + 1);
+}
+
+void fail(const std::string& path, int line_no, const char* what) {
+    throw std::runtime_error(path + ":" + std::to_string(line_no) + ": " + what);
 }
 
 }
@@ -26,25 +32,27 @@ SourceConfig load_config(const std::string& path) {
 
     SourceConfig config;
     std::string line;
-    while (std::getline(file, line)) {
-        const std::string trimmed = trim(line);
-        if (trimmed.empty() || trimmed[0] == '#') {
+    for (int line_no = 1; std::getline(file, line); ++line_no) {
+        const std::string_view trimmed = trim(line);
+        if (trimmed.empty() || trimmed.front() == '#') {
             continue;
         }
 
         const auto eq = trimmed.find('=');
-        if (eq == std::string::npos) {
-            throw std::runtime_error(
-                "malformed config line (expected key=value): " + line);
+        if (eq == std::string_view::npos) {
+            fail(path, line_no, "expected key=value");
         }
 
-        std::string key = trim(trimmed.substr(0, eq));
-        std::string value = trim(trimmed.substr(eq + 1));
+        const std::string_view key = trim(trimmed.substr(0, eq));
         if (key.empty()) {
-            throw std::runtime_error("malformed config line (empty key): " + line);
+            fail(path, line_no, "empty key");
         }
 
-        config.params.emplace_back(std::move(key), std::move(value));
+        config.params.emplace_back(key, trim(trimmed.substr(eq + 1)));
+    }
+
+    if (config.params.empty()) {
+        throw std::runtime_error("no parameters in config file: " + path);
     }
 
     return config;

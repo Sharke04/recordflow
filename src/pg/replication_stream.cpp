@@ -141,10 +141,6 @@ int stream(const std::string& slot, const std::string& publication) {
         std::fprintf(stderr, "config error: %s\n", e.what());
         return 1;
     }
-    if (config.params.empty()) {
-        std::fprintf(stderr, "config error: recordflow.conf has no parameters\n");
-        return 1;
-    }
 
     PGconn* conn = connect_replication(std::move(config));
     if (PQstatus(conn) != CONNECTION_OK) {
