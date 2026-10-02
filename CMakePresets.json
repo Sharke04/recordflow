@@ -3,20 +3,64 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
   "configurePresets": [
     {
-      "name": "ucrt64",
-      "displayName": "MSYS2 UCRT64 (Ninja)",
-      "description": "Build with the UCRT64 GCC toolchain and Ninja",
+      "name": "base",
+      "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "ucrt64",
+      "inherits": "base",
+      "displayName": "MSYS2 UCRT64 (Ninja)",
+      "description": "Build with the UCRT64 GCC toolchain. Needs mingw-w64-ucrt-x86_64-postgresql and mingw-w64-ucrt-x86_64-librdkafka.",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
         "CMAKE_C_COMPILER": "C:/msys64/ucrt64/bin/gcc.exe",
         "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
-        "CMAKE_PREFIX_PATH": "C:/msys64/ucrt64",
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_PREFIX_PATH": "C:/msys64/ucrt64"
+      }
+    },
+    {
+      "name": "macos",
+      "inherits": "base",
+      "displayName": "macOS (Homebrew, Apple Silicon)",
+      "description": "Build against Homebrew libpq and librdkafka. Needs `brew install libpq librdkafka`.",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "/opt/homebrew;/opt/homebrew/opt/libpq",
+        "PostgreSQL_ROOT": "/opt/homebrew/opt/libpq"
       }
     }
   ],
   "buildPresets": [
-    { "name": "ucrt64", "configurePreset": "ucrt64" }
+    {
+      "name": "ucrt64",
+      "configurePreset": "ucrt64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "macos",
+      "configurePreset": "macos",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    }
   ]
 }
