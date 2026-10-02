@@ -9,6 +9,26 @@
 
 namespace pgoutput {
 
+namespace {
+
+// Seeds an event with everything the relation cache knows about the table. The
+// key columns are copied out here because the R message is the only place they
+// are ever announced.
+ChangeEvent event_for(Op op, const TableInfo& rel) {
+    ChangeEvent event;
+    event.op = op;
+    event.schema = rel.schema;
+    event.table = rel.name;
+    for (const auto& column : rel.columns) {
+        if (column.part_of_key) {
+            event.key_columns.push_back(column.name);
+        }
+    }
+    return event;
+}
+
+}
+
 TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteCursor& buf) const {
     buf.get();
     TableInfo t;
@@ -29,30 +49,35 @@ TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteCursor& buf) const {
     return t;
 }
 
-DecodedDml WalMessageDecoder::decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
-    return {std::nullopt, decodeTuple(buf, rel)};
+    ChangeEvent event = event_for(Op::Insert, rel);
+    event.after = decodeTuple(buf, rel);
+    return event;
 }
 
-DecodedDml WalMessageDecoder::decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
-    std::optional<Row> before;
+    ChangeEvent event = event_for(Op::Update, rel);
     const char kind = static_cast<char>(buf.get());
     if (kind == 'K' || kind == 'O') {
-        before = decodeTuple(buf, rel);
+        event.before = decodeTuple(buf, rel);
         buf.get();
     }
-    return {std::move(before), decodeTuple(buf, rel)};
+    event.after = decodeTuple(buf, rel);
+    return event;
 }
 
-DecodedDml WalMessageDecoder::decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
-    return {decodeTuple(buf, rel), std::nullopt};
+    ChangeEvent event = event_for(Op::Delete, rel);
+    event.before = decodeTuple(buf, rel);
+    return event;
 }
 
 Row WalMessageDecoder::decodeTuple(pgwire::ByteCursor& buf, const TableInfo& rel) const {
@@ -172,25 +197,39 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                     (it != relations_.end()) ? it->second : kUnknown;
                 const std::string label = relation_label(oid);
 
+                ChangeEvent event =
+                    (type == 'I')   ? decoder_.decodeInsert(buf, rel)
+                    : (type == 'U') ? decoder_.decodeUpdate(buf, rel)
+                                    : decoder_.decodeDelete(buf, rel);
+
+                // No R message has been seen for this OID, so there are no
+                // column names to key on. Fall back to the OID as the table
+                // name, which at least keeps the events of one table together.
+                if (rel.oid == 0) {
+                    event.table = label;
+                }
+                event.xid = transaction_.xid;
+                event.lsn = transaction_.lsn;
+                event.commit_ts = transaction_.commit_ts;
+
                 if (type == 'I') {
-                    const DecodedDml dml = decoder_.decodeInsert(buf, rel);
                     std::printf("INSERT   %s %s\n", label.c_str(),
-                                format_row(*dml.after).c_str());
+                                format_row(*event.after).c_str());
                 } else if (type == 'U') {
-                    const DecodedDml dml = decoder_.decodeUpdate(buf, rel);
-                    if (dml.before) {
+                    if (event.before) {
                         std::printf("UPDATE   %s old=%s new=%s\n", label.c_str(),
-                                    format_row(*dml.before).c_str(),
-                                    format_row(*dml.after).c_str());
+                                    format_row(*event.before).c_str(),
+                                    format_row(*event.after).c_str());
                     } else {
                         std::printf("UPDATE   %s new=%s\n", label.c_str(),
-                                    format_row(*dml.after).c_str());
+                                    format_row(*event.after).c_str());
                     }
                 } else {
-                    const DecodedDml dml = decoder_.decodeDelete(buf, rel);
                     std::printf("DELETE   %s old=%s\n", label.c_str(),
-                                format_row(*dml.before).c_str());
+                                format_row(*event.before).c_str());
                 }
+
+                parsed.events.push_back(std::move(event));
                 break;
             }
             case 'B': {
@@ -198,6 +237,7 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                 const auto lsn = static_cast<std::uint64_t>(buf.getLong());
                 const std::int64_t ts = buf.getLong();
                 const auto xid = static_cast<std::uint32_t>(buf.getInt());
+                transaction_ = {xid, lsn, ts};
                 std::printf("BEGIN    xid=%u lsn=%s ts=%s\n", xid,
                             format_lsn(lsn).c_str(), format_timestamp(ts).c_str());
                 break;
@@ -220,9 +260,27 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                 const std::int32_t nrel = buf.getInt();
                 buf.get();
                 std::string list;
+                // One event per truncated relation, so each lands on the
+                // partition that carries the rest of that table's history.
                 for (std::int32_t i = 0; i < nrel; ++i) {
+                    const auto oid = static_cast<std::uint32_t>(buf.getInt());
+                    const std::string label = relation_label(oid);
                     if (i) list += ", ";
-                    list += relation_label(static_cast<std::uint32_t>(buf.getInt()));
+                    list += label;
+
+                    ChangeEvent event;
+                    event.op = Op::Truncate;
+                    const auto it = relations_.find(oid);
+                    if (it != relations_.end()) {
+                        event.schema = it->second.schema;
+                        event.table = it->second.name;
+                    } else {
+                        event.table = label;
+                    }
+                    event.xid = transaction_.xid;
+                    event.lsn = transaction_.lsn;
+                    event.commit_ts = transaction_.commit_ts;
+                    parsed.events.push_back(std::move(event));
                 }
                 std::printf("TRUNCATE %s\n", list.c_str());
                 break;

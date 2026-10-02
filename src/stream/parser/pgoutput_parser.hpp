@@ -2,12 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
+#include "stream/publisher/change_event.hpp"
 #include "stream/wire.hpp"
 
 namespace pgoutput {
@@ -27,20 +26,6 @@ struct TableInfo {
     std::vector<ColumnInfo> columns;
 };
 
-struct Value {
-    enum class Kind { Null, UnchangedToast, Text };
-
-    Kind kind = Kind::Null;
-    std::string text;
-};
-
-using Row = std::vector<std::pair<std::string, Value>>;
-
-struct DecodedDml {
-    std::optional<Row> before;
-    std::optional<Row> after;
-};
-
 class WalMessageDecoder {
 public:
     char peekType(const pgwire::ByteCursor& buf) const { return buf.typeAt(); }
@@ -49,17 +34,27 @@ public:
     }
 
     TableInfo decodeRelation(pgwire::ByteCursor& buf) const;
-    DecodedDml decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const;
-    DecodedDml decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const;
-    DecodedDml decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const;
+    ChangeEvent decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const;
+    ChangeEvent decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const;
+    ChangeEvent decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const;
 
 private:
     Row decodeTuple(pgwire::ByteCursor& buf, const TableInfo& rel) const;
 };
 
+// Transaction context carried by a Begin message. pgoutput sends the xid, the
+// commit timestamp and the LSN of the commit record up front, so every event
+// in the transaction can be stamped as it is decoded.
+struct TransactionInfo {
+    std::uint32_t xid = 0;
+    std::uint64_t lsn = 0;
+    std::int64_t commit_ts = 0;
+};
+
 struct ParsedMessage {
     char type = 0;
     std::uint64_t commit_end_lsn = 0;
+    std::vector<ChangeEvent> events;
 };
 
 }
@@ -73,4 +68,5 @@ private:
 
     pgoutput::WalMessageDecoder decoder_;
     std::unordered_map<std::uint32_t, pgoutput::TableInfo> relations_;
+    pgoutput::TransactionInfo transaction_;
 };

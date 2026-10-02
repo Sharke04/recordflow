@@ -64,7 +64,7 @@ else()
                 "mingw-w64-ucrt-x86_64-librdkafka`), or point CMAKE_PREFIX_PATH "
                 "at an existing install.")
         endif()
-        target_include_directories(recordflow_rdkafka INTERFACE ${RDKAFKA_INCLUDE_DIR})
+        target_include_directories(recordflow_rdkafka SYSTEM INTERFACE ${RDKAFKA_INCLUDE_DIR})
         target_link_libraries(recordflow_rdkafka INTERFACE ${RDKAFKA_LIBRARY})
         set(RECORDFLOW_RDKAFKA_ORIGIN "manual search (${RDKAFKA_LIBRARY})")
     endif()
@@ -76,6 +76,8 @@ message(STATUS "librdkafka located via: ${RECORDFLOW_RDKAFKA_ORIGIN}")
 add_library(recordflow_core
     src/config.cpp
         src/stream/parser/pgoutput_parser.cpp
+        src/stream/publisher/change_event.cpp
+        src/stream/publisher/kafka_publisher.cpp
         src/stream/replication_stream.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
