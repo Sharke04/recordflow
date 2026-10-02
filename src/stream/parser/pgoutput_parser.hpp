@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "stream/publisher/change_event.hpp"
+#include "stream/model/change_event.hpp"
 #include "stream/wire.hpp"
 
 namespace pgoutput {
@@ -28,23 +28,20 @@ struct TableInfo {
 
 class WalMessageDecoder {
 public:
-    char peekType(const pgwire::ByteCursor& buf) const { return buf.typeAt(); }
-    std::uint32_t peekOid(const pgwire::ByteCursor& buf) const {
+    char peekType(const pgwire::ByteReader& buf) const { return buf.typeAt(); }
+    std::uint32_t peekOid(const pgwire::ByteReader& buf) const {
         return static_cast<std::uint32_t>(buf.intAt(1));
     }
 
-    TableInfo decodeRelation(pgwire::ByteCursor& buf) const;
-    ChangeEvent decodeInsert(pgwire::ByteCursor& buf, const TableInfo& rel) const;
-    ChangeEvent decodeUpdate(pgwire::ByteCursor& buf, const TableInfo& rel) const;
-    ChangeEvent decodeDelete(pgwire::ByteCursor& buf, const TableInfo& rel) const;
+    TableInfo decodeRelation(pgwire::ByteReader& buf) const;
+    ChangeEvent decodeInsert(pgwire::ByteReader& buf, const TableInfo& rel) const;
+    ChangeEvent decodeUpdate(pgwire::ByteReader& buf, const TableInfo& rel) const;
+    ChangeEvent decodeDelete(pgwire::ByteReader& buf, const TableInfo& rel) const;
 
 private:
-    Row decodeTuple(pgwire::ByteCursor& buf, const TableInfo& rel) const;
+    Row decodeTuple(pgwire::ByteReader& buf, const TableInfo& rel) const;
 };
 
-// Transaction context carried by a Begin message. pgoutput sends the xid, the
-// commit timestamp and the LSN of the commit record up front, so every event
-// in the transaction can be stamped as it is decoded.
 struct TransactionInfo {
     std::uint32_t xid = 0;
     std::uint64_t lsn = 0;

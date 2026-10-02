@@ -7,9 +7,9 @@
 
 namespace pgwire {
 
-class ByteCursor {
+class ByteReader {
 public:
-    ByteCursor(const char* data, std::size_t len) : data_(data), len_(len) {}
+    ByteReader(const char* data, std::size_t len) : data_(data), len_(len) {}
 
     std::uint8_t get() { return byte(advance(1)); }
     std::int16_t getShort() {
