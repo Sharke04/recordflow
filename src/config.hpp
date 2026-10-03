@@ -6,12 +6,8 @@
 
 using KeyValues = std::vector<std::pair<std::string, std::string>>;
 
-struct SourceConfig {
-    KeyValues params;
-};
-
 struct Config {
-    SourceConfig source;
+    KeyValues params;
 };
 
 Config load_config(const std::string& path = "recordflow.conf");

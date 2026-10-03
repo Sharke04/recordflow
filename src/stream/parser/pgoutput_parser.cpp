@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "stream/printer/change_event_printer.hpp"
+
 namespace pgoutput {
 
 namespace {
@@ -17,9 +19,8 @@ ChangeEvent event_for(Op op, const TableInfo& rel) {
     event.schema = rel.schema;
     event.table = rel.name;
     for (const auto& column : rel.columns) {
-        if (column.part_of_key) {
+        if (column.part_of_key)
             event.key_columns.push_back(column.name);
-        }
     }
     return event;
 }
@@ -109,27 +110,14 @@ namespace {
 using namespace pgoutput;
 
 std::string format_lsn(std::uint64_t lsn) {
-    char b[24];
-    std::snprintf(b, sizeof b, "%X/%X", static_cast<unsigned>(lsn >> 32),
-                  static_cast<unsigned>(lsn));
-    return b;
+    const auto high = static_cast<std::uint32_t>(lsn >> 32);
+    const auto low = static_cast<std::uint32_t>(lsn);
+    return std::format("{:X}/{:X}", high, low);
 }
 
 std::string format_timestamp(std::int64_t micros) {
-    using namespace std::chrono;
-    constexpr seconds kPostgresEpoch{946684800};
-    const sys_time<microseconds> t{microseconds{micros} + kPostgresEpoch};
+    const auto t = kPostgresEpoch + std::chrono::microseconds{micros};
     return std::format("{:%F %T}Z", t);
-}
-
-const char* replica_identity_name(char c) {
-    switch (c) {
-        case 'd': return "default";
-        case 'n': return "nothing";
-        case 'f': return "full";
-        case 'i': return "index";
-        default:  return "?";
-    }
 }
 
 }
@@ -142,43 +130,33 @@ std::string PgoutputParser::relation_label(std::uint32_t oid) const {
     return "oid=" + std::to_string(oid);
 }
 
-pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
-                                                      std::size_t len) {
-    if (len == 0) {
+ParsedMessage PgoutputParser::handle_message(const char* data, std::size_t len) {
+    if (len == 0)
         return {};
-    }
+
     try {
         pgwire::ByteReader buf(data, len);
-        pgoutput::ParsedMessage parsed;
-        const char type = decoder_.peekType(buf);
-        parsed.type = type;
-        switch (type) {
+        ParsedMessage parsed;
+        parsed.type = decoder_.peekType(buf);
+        switch (parsed.type) {
             case 'R': {
-                pgoutput::TableInfo t = decoder_.decodeRelation(buf);
-                std::printf("RELATION %s.%s oid=%u identity=%s cols=[",
-                            t.schema.c_str(), t.name.c_str(), t.oid,
-                            replica_identity_name(t.replica_identity));
-                for (std::size_t i = 0; i < t.columns.size(); ++i) {
-                    std::printf("%s%s%s", i ? ", " : "",
-                                t.columns[i].part_of_key ? "*" : "",
-                                t.columns[i].name.c_str());
-                }
-                std::printf("]\n");
-                relations_[t.oid] = std::move(t);
+                TableInfo t = decoder_.decodeRelation(buf);
+                relations_[t.oid] = t;
+                parsed.relation = std::move(t);
                 break;
             }
             case 'I':
             case 'U':
             case 'D': {
-                static const pgoutput::TableInfo kUnknown;
+                static const TableInfo kUnknown;
                 const std::uint32_t oid = decoder_.peekOid(buf);
                 const auto it = relations_.find(oid);
-                const pgoutput::TableInfo& rel =
+                const TableInfo& rel =
                     (it != relations_.end()) ? it->second : kUnknown;
 
                 ChangeEvent event =
-                    (type == 'I')   ? decoder_.decodeInsert(buf, rel)
-                    : (type == 'U') ? decoder_.decodeUpdate(buf, rel)
+                    (parsed.type == 'I')   ? decoder_.decodeInsert(buf, rel)
+                    : (parsed.type == 'U') ? decoder_.decodeUpdate(buf, rel)
                                     : decoder_.decodeDelete(buf, rel);
 
                 // No R message has been seen for this OID, so the table name
@@ -246,8 +224,8 @@ pgoutput::ParsedMessage PgoutputParser::handle_message(const char* data,
                 std::printf("TYPE     (not decoded)\n");
                 break;
             default:
-                std::printf("?        message type '%c' (0x%02x)\n", type,
-                            static_cast<unsigned char>(type));
+                std::printf("?        message type '%c' (0x%02x)\n", parsed.type,
+                            static_cast<unsigned char>(parsed.type));
                 break;
         }
         std::fflush(stdout);

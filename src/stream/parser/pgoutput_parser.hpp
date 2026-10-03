@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -52,6 +53,7 @@ struct ParsedMessage {
     char type = 0;
     std::uint64_t commit_end_lsn = 0;
     std::vector<ChangeEvent> events;
+    std::optional<TableInfo> relation;
 };
 
 }
