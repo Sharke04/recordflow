@@ -8,11 +8,8 @@
 
 namespace pgoutput {
 
-// One column value as it arrived on the wire. The three kinds are deliberately
-// distinct: an unchanged TOAST value still exists in the row and was merely
-// omitted from the wire, so collapsing it into Null would erase data
-// downstream.
 struct Value {
+    // UnchangedToast is for values in TOAST table
     enum class Kind { Null, UnchangedToast, Text };
 
     Kind kind = Kind::Null;
@@ -21,10 +18,10 @@ struct Value {
 
 using Row = std::vector<std::pair<std::string, Value>>;
 
-enum class Op { Insert, Update, Delete, Truncate };
+enum class Op { Unknown, Insert, Update, Delete, Truncate };
 
 struct ChangeEvent {
-    Op op = Op::Insert; //TODO: Why is it Insert by default?
+    Op op = Op::Unknown;
     std::string schema;
     std::string table;
     std::vector<std::string> key_columns;
