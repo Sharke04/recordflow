@@ -81,11 +81,46 @@ struct CopyBuffer {
     ~CopyBuffer() { PQfreemem(data); }
 };
 
-int run_stream(PGconn* conn) {
-    PgoutputParser parser;
-
+struct StreamState {
     std::uint64_t confirmed = 0;
     bool in_transaction = false;
+};
+
+void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
+                      PgoutputParser& parser, StreamState& state) {
+    frame.getLong();
+    frame.getLong();
+    frame.getLong();
+    const pgoutput::ParsedMessage msg =
+        parser.handle_message(frame.rest(), frame.remaining());
+    for (const pgoutput::ChangeEvent& event : msg.events) {
+        print_change_event(event);
+    }
+    if (msg.type == 'B') {
+        state.in_transaction = true;
+    } else if (msg.type == 'C') {
+        state.in_transaction = false;
+        state.confirmed = std::max(state.confirmed, msg.commit_end_lsn);
+        send_standby_status(conn, state.confirmed);
+    }
+}
+
+void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame,
+                      StreamState& state) {
+    const auto wal_end = static_cast<std::uint64_t>(frame.getLong());
+    frame.getLong();
+    const bool reply_requested = frame.get() != 0;
+    if (!state.in_transaction) {
+        state.confirmed = std::max(state.confirmed, wal_end);
+    }
+    if (reply_requested) {
+        send_standby_status(conn, state.confirmed);
+    }
+}
+
+int run_stream(PGconn* conn) {
+    PgoutputParser parser;
+    StreamState state;
 
     for (;;) {
         CopyBuffer buf;
@@ -105,36 +140,12 @@ int run_stream(PGconn* conn) {
         try {
             pgwire::ByteReader frame(buf.data, static_cast<std::size_t>(len));
             switch (frame.get()) {
-                case 'w': {
-                    frame.getLong();
-                    frame.getLong();
-                    frame.getLong();
-                    const pgoutput::ParsedMessage msg =
-                        parser.handle_message(frame.rest(), frame.remaining());
-                    for (const pgoutput::ChangeEvent& event : msg.events) {
-                        print_change_event(event);
-                    }
-                    if (msg.type == 'B') {
-                        in_transaction = true;
-                    } else if (msg.type == 'C') {
-                        in_transaction = false;
-                        confirmed = std::max(confirmed, msg.commit_end_lsn);
-                        send_standby_status(conn, confirmed);
-                    }
+                case 'w':
+                    handle_xlog_data(conn, frame, parser, state);
                     break;
-                }
-                case 'k': {
-                    const auto wal_end = static_cast<std::uint64_t>(frame.getLong());
-                    frame.getLong();
-                    const bool reply_requested = frame.get() != 0;
-                    if (!in_transaction) {
-                        confirmed = std::max(confirmed, wal_end);
-                    }
-                    if (reply_requested) {
-                        send_standby_status(conn, confirmed);
-                    }
+                case 'k':
+                    handle_keepalive(conn, frame, state);
                     break;
-                }
             }
         } catch (const std::exception& e) {
             std::fprintf(stderr, "warning: skipping malformed frame: %s\n", e.what());
