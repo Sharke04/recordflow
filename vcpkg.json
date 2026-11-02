@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "recordflow",
+  "version": "0.1.0",
+  "description": "Change-data-capture from PostgreSQL to ClickHouse",
+  "dependencies": [
+    "libpq",
+    "clickhouse-cpp",
+    "nlohmann-json",
+    "tomlplusplus",
+    "gtest"
+  ],
+  "builtin-baseline": "93ad765c7b66ab9ce97469ec23a90b15c3a14ee5"
+}
