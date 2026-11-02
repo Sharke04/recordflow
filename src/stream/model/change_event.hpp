@@ -22,7 +22,7 @@ enum class Op { Unknown, Insert, Update, Delete, Truncate };
 
 struct ChangeEvent {
     Op op = Op::Unknown;
-    std::string schema;
+    std::string schema_name;
     std::string table;
     std::vector<std::string> key_columns;
     std::optional<Row> before;

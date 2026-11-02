@@ -86,7 +86,7 @@ std::string format_row(const std::optional<Row>& row) {
 
 void print_change_event(const pgoutput::ChangeEvent& event) {
     const std::string table =
-        event.schema.empty() ? event.table : event.schema + "." + event.table;
+        event.schema_name.empty() ? event.table : event.schema_name + "." + event.table;
 
     std::printf("ChangeEvent\n");
     std::printf("  op          = %s\n", op_name(event.op));
