@@ -12,6 +12,24 @@
       }
     },
     {
+      "name": "vcpkg",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+    },
+    {
+      "name": "linux",
+      "inherits": "vcpkg",
+      "displayName": "Linux / WSL2 (Ninja, vcpkg)",
+      "description": "Build with the system GCC and dependencies from the vcpkg manifest. Needs VCPKG_ROOT.",
+      "binaryDir": "${sourceDir}/build/linux",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "ucrt64",
       "inherits": "base",
       "displayName": "MSYS2 UCRT64 (Ninja)",
@@ -29,21 +47,27 @@
     },
     {
       "name": "macos",
-      "inherits": "base",
-      "displayName": "macOS (Homebrew, Apple Silicon)",
-      "description": "Build against Homebrew libpq. Needs `brew install libpq`.",
+      "inherits": "vcpkg",
+      "displayName": "macOS (Ninja, vcpkg)",
+      "description": "Build with Apple Clang and dependencies from the vcpkg manifest. Needs VCPKG_ROOT.",
+      "binaryDir": "${sourceDir}/build/macos",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
-      },
-      "cacheVariables": {
-        "CMAKE_PREFIX_PATH": "/opt/homebrew;/opt/homebrew/opt/libpq",
-        "PostgreSQL_ROOT": "/opt/homebrew/opt/libpq"
       }
     }
   ],
   "buildPresets": [
+    {
+      "name": "linux",
+      "configurePreset": "linux",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
     {
       "name": "ucrt64",
       "configurePreset": "ucrt64",
