@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: recordflow-source-db
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: cdc
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - recordflow_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdc -d mydb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
