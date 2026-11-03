@@ -3,19 +3,13 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
   "configurePresets": [
     {
-      "name": "base",
+      "name": "vcpkg",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
-    },
-    {
-      "name": "vcpkg",
-      "hidden": true,
-      "inherits": "base",
-      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
     },
     {
       "name": "linux",
@@ -27,22 +21,6 @@
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Linux"
-      }
-    },
-    {
-      "name": "ucrt64",
-      "inherits": "base",
-      "displayName": "MSYS2 UCRT64 (Ninja)",
-      "description": "Build with the UCRT64 GCC toolchain. Needs mingw-w64-ucrt-x86_64-postgresql.",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "C:/msys64/ucrt64/bin/gcc.exe",
-        "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
-        "CMAKE_PREFIX_PATH": "C:/msys64/ucrt64"
       }
     },
     {
@@ -66,15 +44,6 @@
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Linux"
-      }
-    },
-    {
-      "name": "ucrt64",
-      "configurePreset": "ucrt64",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
       }
     },
     {
