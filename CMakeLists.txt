@@ -60,3 +60,9 @@ endif()
 
 add_executable(recordflow src/main.cpp)
 target_link_libraries(recordflow PRIVATE recordflow_core)
+
+option(RECORDFLOW_BUILD_TESTS "Build the unit and integration tests" ON)
+if(RECORDFLOW_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
