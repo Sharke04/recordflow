@@ -31,9 +31,25 @@ Two properties define the design:
 
 | | |
 |---|---|
-| Toolchain | MSYS2 **UCRT64** GCC (C++20) |
+| Platform | Linux (on Windows: **WSL2**, e.g. Ubuntu 24.04) |
+| Toolchain | GCC with C++20 |
 | Build system | CMake ≥ 3.20 + Ninja |
-| Dependency | libpq (`mingw-w64-ucrt-x86_64-postgresql`) |a
+| Dependencies | from the **vcpkg** manifest (`vcpkg.json`): libpq, clickhouse-cpp, nlohmann-json, tomlplusplus, GoogleTest |
+| Local services | Docker with Compose (Docker Desktop with WSL integration on Windows) |
+
+On Ubuntu, install the build tools once:
+
+```bash
+sudo apt install -y build-essential cmake ninja-build pkg-config zip unzip curl tar git \
+    autoconf autoconf-archive automake libtool bison flex python3-venv
+```
+
+and vcpkg:
+
+```bash
+git clone https://github.com/microsoft/vcpkg ~/vcpkg && ~/vcpkg/bootstrap-vcpkg.sh
+echo 'export VCPKG_ROOT=$HOME/vcpkg' >> ~/.bashrc
+```
 
 **Source database**
 
@@ -51,7 +67,7 @@ Two properties define the design:
 host=localhost
 port=5432
 dbname=mydb
-user=cdc
+user=recordflow
 password=changeme
 ```
 
@@ -65,16 +81,32 @@ Copy `recordflow.conf.example` to `recordflow.conf` and fill in real values.
 
 Recordflow never changes the source database, so you set it up manually before the first run: a publication for the tables to capture, a logical replication slot bound to `pgoutput`, and a role with the `REPLICATION` attribute and `SELECT` on those tables.
 
-For local development, `docker compose up -d` starts a PostgreSQL with `wal_level=logical` on `localhost:5432`.
+For local development, Docker Compose starts PostgreSQL (`wal_level=logical`, `localhost:5432`) and ClickHouse (`localhost:9000`, HTTP on `8123`):
+
+```bash
+cp .env.example .env      # local credentials; .env is git-ignored
+docker compose up -d --wait
+```
+
+On the first start, the init scripts in `docker/` create the same roles and users as a production setup: the PostgreSQL role `recordflow` with a test table `public.orders`, the publication `recordflow_pub` and the slot `recordflow_slot`, and the ClickHouse database `recordflow` with the users `recordflow` and `analyst`. The scripts run only when a data volume is empty; to rerun them, remove the volumes with `docker compose down -v`.
 
 ### 2. Build
 
 ```bash
-cmake --preset ucrt64
-cmake --build --preset ucrt64
+cmake --preset linux
+cmake --build --preset linux
 ```
 
-The `ucrt64` preset pins the UCRT64 compilers and `CMAKE_PREFIX_PATH`, and produces `build/recordflow.exe`.
+The `linux` preset uses the vcpkg toolchain from `$VCPKG_ROOT`; the first configure builds the dependencies from `vcpkg.json` (this takes several minutes once, then it is cached). The binary is `build/linux/recordflow`.
+
+Tests:
+
+```bash
+ctest --preset linux -L unit                        # no services needed
+RECORDFLOW_IT=1 ctest --preset linux -L integration # needs docker compose up
+```
+
+Without `RECORDFLOW_IT=1`, integration tests are skipped.
 
 ### 3. Run
 
@@ -83,7 +115,7 @@ recordflow <slot> <publication>
 ```
 
 ```bash
-./build/recordflow.exe recordflow_slot recordflow_pub
+./build/linux/recordflow recordflow_slot recordflow_pub
 ```
 
 Status messages ("Connected…", "Streaming…") go to **stderr**; decoded events go to **stdout**, so the two are easy to separate.
