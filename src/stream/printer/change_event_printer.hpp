@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-#include "stream/model/change_event.hpp"
+#include "core/change_event.hpp"
 #include "stream/parser/pgoutput_parser.hpp"
 
 namespace pgoutput {
