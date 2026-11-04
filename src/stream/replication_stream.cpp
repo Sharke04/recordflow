@@ -13,7 +13,7 @@
 #include "config.hpp"
 #include "stream/parser/pgoutput_parser.hpp"
 #include "stream/printer/change_event_printer.hpp"
-#include "stream/wire.hpp"
+#include "pgoutput/wire.hpp"
 
 namespace {
 
