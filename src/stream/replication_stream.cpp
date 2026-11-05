@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "pgoutput/decoder.hpp"
 #include "stream/printer/change_event_printer.hpp"
 #include "pgoutput/wire.hpp"
+#include "runtime/errors.hpp"
 #include "runtime/log.hpp"
 
 namespace recordflow {
@@ -48,7 +50,7 @@ PGconn* connect_replication(KeyValues params) {
     return PQconnectdbParams(keywords.data(), values.data(), 0);
 }
 
-bool start_replication(PGconn* conn, const std::string& slot,
+void start_replication(PGconn* conn, const std::string& slot,
                        const std::string& publication) {
     const std::string command =
         "START_REPLICATION SLOT " + slot + " LOGICAL 0/0"
@@ -56,13 +58,17 @@ bool start_replication(PGconn* conn, const std::string& slot,
 
     PGresult* res = PQexec(conn, command.c_str());
     const bool ok = res && PQresultStatus(res) == PGRES_COPY_BOTH;
+    PQclear(res);
 
     if (!ok)
-        log::error("could not start replication: {}", PQerrorMessage(conn));
-
-    PQclear(res);
-    return ok;
+        throw InterventionError(std::string("could not start replication: ") +
+                                PQerrorMessage(conn));
 }
+
+struct ConnectionCloser {
+    void operator()(PGconn* conn) const { PQfinish(conn); }
+};
+using Connection = std::unique_ptr<PGconn, ConnectionCloser>;
 
 void send_standby_status(PGconn* conn, std::uint64_t lsn) {
     constexpr std::uint64_t kNoClientTime = 0;
@@ -170,26 +176,19 @@ int stream(const std::string& slot, const std::string& publication) {
     try {
         config = load_config();
     } catch (const std::exception& e) {
-        log::error("config error: {}", e.what());
-        return 1;
+        throw ConfigError(e.what());
     }
 
-    PGconn* conn = connect_replication(std::move(config.params));
-    if (PQstatus(conn) != CONNECTION_OK) {
-        log::error("connection failed: {}", PQerrorMessage(conn));
-        PQfinish(conn);
-        return 1;
+    Connection conn(connect_replication(std::move(config.params)));
+    if (PQstatus(conn.get()) != CONNECTION_OK) {
+        throw TransientError(Resource::PostgresReplication,
+                             std::string("connection failed: ") + PQerrorMessage(conn.get()));
     }
     log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
 
-    int exit_code = 1;
-    if (start_replication(conn, slot, publication)) {
-        log::info("Streaming (Ctrl+C to stop)...");
-        exit_code = run_stream(conn);
-    }
-
-    PQfinish(conn);
-    return exit_code;
+    start_replication(conn.get(), slot, publication);
+    log::info("Streaming (Ctrl+C to stop)...");
+    return run_stream(conn.get());
 }
 
 }  // namespace recordflow
