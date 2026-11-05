@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace pgwire {
+namespace recordflow::pgoutput {
 
 class ByteReader {
 public:

@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace pgoutput {
+namespace recordflow::core {
 
 struct Value {
     // UnchangedToast is for values in TOAST table

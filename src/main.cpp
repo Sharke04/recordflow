@@ -11,5 +11,5 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    return stream(argv[1], argv[2]);
+    return recordflow::stream(argv[1], argv[2]);
 }

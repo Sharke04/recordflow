@@ -10,7 +10,12 @@
 #include "core/change_event.hpp"
 #include "pgoutput/wire.hpp"
 
-namespace pgoutput {
+namespace recordflow::pgoutput {
+
+using core::ChangeEvent;
+using core::Op;
+using core::Row;
+using core::Value;
 
 struct ColumnInfo {
     std::string name;
@@ -29,18 +34,18 @@ struct TableInfo {
 
 class WalMessageDecoder {
 public:
-    char peekType(const pgwire::ByteReader& buf) const { return buf.typeAt(); }
-    std::uint32_t peekOid(const pgwire::ByteReader& buf) const {
+    char peekType(const ByteReader& buf) const { return buf.typeAt(); }
+    std::uint32_t peekOid(const ByteReader& buf) const {
         return static_cast<std::uint32_t>(buf.intAt(1));
     }
 
-    TableInfo decodeRelation(pgwire::ByteReader& buf) const;
-    ChangeEvent decodeInsert(pgwire::ByteReader& buf, const TableInfo& rel) const;
-    ChangeEvent decodeUpdate(pgwire::ByteReader& buf, const TableInfo& rel) const;
-    ChangeEvent decodeDelete(pgwire::ByteReader& buf, const TableInfo& rel) const;
+    TableInfo decodeRelation(ByteReader& buf) const;
+    ChangeEvent decodeInsert(ByteReader& buf, const TableInfo& rel) const;
+    ChangeEvent decodeUpdate(ByteReader& buf, const TableInfo& rel) const;
+    ChangeEvent decodeDelete(ByteReader& buf, const TableInfo& rel) const;
 
 private:
-    Row decodeTuple(pgwire::ByteReader& buf, const TableInfo& rel) const;
+    Row decodeTuple(ByteReader& buf, const TableInfo& rel) const;
 };
 
 struct TransactionInfo {
@@ -56,16 +61,16 @@ struct ParsedMessage {
     std::optional<TableInfo> relation;
 };
 
-}
-
 class PgoutputDecoder {
 public:
-    pgoutput::ParsedMessage handle_message(const char* data, std::size_t len);
+    ParsedMessage handle_message(const char* data, std::size_t len);
 
 private:
     std::string relation_label(std::uint32_t oid) const;
 
-    pgoutput::WalMessageDecoder decoder_;
-    std::unordered_map<std::uint32_t, pgoutput::TableInfo> relations_;
-    pgoutput::TransactionInfo transaction_;
+    WalMessageDecoder decoder_;
+    std::unordered_map<std::uint32_t, TableInfo> relations_;
+    TransactionInfo transaction_;
 };
+
+}  // namespace recordflow::pgoutput

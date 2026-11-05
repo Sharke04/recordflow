@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+namespace recordflow {
+
 namespace {
 
 using namespace pgoutput;
@@ -84,7 +86,7 @@ std::string format_row(const std::optional<Row>& row) {
 
 }
 
-void print_change_event(const pgoutput::ChangeEvent& event) {
+void print_change_event(const core::ChangeEvent& event) {
     const std::string table =
         event.schema_name.empty() ? event.table : event.schema_name + "." + event.table;
 
@@ -112,3 +114,5 @@ void print_relation(const pgoutput::TableInfo& table) {
     std::printf("]\n");
     std::fflush(stdout);
 }
+
+}  // namespace recordflow

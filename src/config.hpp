@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+namespace recordflow {
+
 using KeyValues = std::vector<std::pair<std::string, std::string>>;
 
 struct Config {
@@ -11,3 +13,5 @@ struct Config {
 };
 
 Config load_config(const std::string& path = "recordflow.conf");
+
+}  // namespace recordflow

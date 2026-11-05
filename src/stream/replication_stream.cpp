@@ -15,6 +15,8 @@
 #include "stream/printer/change_event_printer.hpp"
 #include "pgoutput/wire.hpp"
 
+namespace recordflow {
+
 namespace {
 
 bool has_param(const KeyValues& params, const std::string& keyword) {
@@ -65,7 +67,7 @@ void send_standby_status(PGconn* conn, std::uint64_t lsn) {
     constexpr std::uint64_t kNoClientTime = 0;
     constexpr std::uint8_t kNoReplyRequested = 0;
 
-    pgwire::ByteWriter msg;
+    pgoutput::ByteWriter msg;
     msg.put('r')
        .putLong(lsn)
        .putLong(lsn)
@@ -90,8 +92,8 @@ struct StreamState {
     bool in_transaction = false;
 };
 
-void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
-                      PgoutputDecoder& decoder, StreamState& state) {
+void handle_xlog_data(PGconn* conn, pgoutput::ByteReader& frame,
+                      pgoutput::PgoutputDecoder& decoder, StreamState& state) {
     frame.getLong();
     frame.getLong();
     frame.getLong();
@@ -101,7 +103,7 @@ void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
     if (msg.relation) {
         print_relation(*msg.relation);
     }
-    for (const pgoutput::ChangeEvent& event : msg.events) {
+    for (const core::ChangeEvent& event : msg.events) {
         print_change_event(event);
     }
 
@@ -114,7 +116,7 @@ void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
     }
 }
 
-void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame, StreamState& state) {
+void handle_keepalive(PGconn* conn, pgoutput::ByteReader& frame, StreamState& state) {
     const auto wal_end = static_cast<std::uint64_t>(frame.getLong());
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
@@ -127,7 +129,7 @@ void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame, StreamState& stat
 }
 
 int run_stream(PGconn* conn) {
-    PgoutputDecoder decoder;
+    pgoutput::PgoutputDecoder decoder;
     StreamState state;
 
     for (;;) {
@@ -146,7 +148,7 @@ int run_stream(PGconn* conn) {
         }
 
         try {
-            pgwire::ByteReader frame(buf.data, static_cast<std::size_t>(len));
+            pgoutput::ByteReader frame(buf.data, static_cast<std::size_t>(len));
             switch (frame.get()) {
                 case 'w':
                     handle_xlog_data(conn, frame, decoder, state);
@@ -191,3 +193,5 @@ int stream(const std::string& slot, const std::string& publication) {
     PQfinish(conn);
     return exit_code;
 }
+
+}  // namespace recordflow

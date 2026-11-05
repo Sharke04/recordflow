@@ -5,7 +5,7 @@
 #include "core/change_event.hpp"
 #include "pgoutput/decoder.hpp"
 
-namespace pgoutput {
+namespace recordflow::pgoutput {
 
 // Postgres timestamps count microseconds since 2000-01-01 00:00:00 UTC
 inline constexpr std::chrono::sys_days kPostgresEpoch {
@@ -14,5 +14,9 @@ inline constexpr std::chrono::sys_days kPostgresEpoch {
 
 }
 
-void print_change_event(const pgoutput::ChangeEvent& event);
+namespace recordflow {
+
+void print_change_event(const core::ChangeEvent& event);
 void print_relation(const pgoutput::TableInfo& table);
+
+}  // namespace recordflow
