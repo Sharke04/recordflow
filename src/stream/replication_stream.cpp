@@ -14,6 +14,7 @@
 #include "pgoutput/decoder.hpp"
 #include "stream/printer/change_event_printer.hpp"
 #include "pgoutput/wire.hpp"
+#include "runtime/log.hpp"
 
 namespace recordflow {
 
@@ -57,7 +58,7 @@ bool start_replication(PGconn* conn, const std::string& slot,
     const bool ok = res && PQresultStatus(res) == PGRES_COPY_BOTH;
 
     if (!ok)
-        std::fprintf(stderr, "could not start replication: %s", PQerrorMessage(conn));
+        log::error("could not start replication: {}", PQerrorMessage(conn));
 
     PQclear(res);
     return ok;
@@ -77,8 +78,7 @@ void send_standby_status(PGconn* conn, std::uint64_t lsn) {
 
     if (PQputCopyData(conn, msg.data(), static_cast<int>(msg.size())) < 0 ||
         PQflush(conn) < 0) {
-        std::fprintf(stderr, "warning: could not send standby status: %s",
-                     PQerrorMessage(conn));
+        log::warn("could not send standby status: {}", PQerrorMessage(conn));
     }
 }
 
@@ -136,11 +136,11 @@ int run_stream(PGconn* conn) {
         CopyBuffer buf;
         const int len = PQgetCopyData(conn, &buf.data, 0);
         if (len == -1) {
-            std::fprintf(stderr, "Stream ended.\n");
+            log::info("Stream ended.");
             return 0;
         }
         if (len == -2) {
-            std::fprintf(stderr, "stream read failed: %s", PQerrorMessage(conn));
+            log::error("stream read failed: {}", PQerrorMessage(conn));
             return 1;
         }
         if (len <= 0) {
@@ -158,7 +158,7 @@ int run_stream(PGconn* conn) {
                     break;
             }
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "warning: skipping malformed frame: %s\n", e.what());
+            log::warn("skipping malformed frame: {}", e.what());
         }
     }
 }
@@ -170,23 +170,21 @@ int stream(const std::string& slot, const std::string& publication) {
     try {
         config = load_config();
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "config error: %s\n", e.what());
+        log::error("config error: {}", e.what());
         return 1;
     }
 
     PGconn* conn = connect_replication(std::move(config.params));
     if (PQstatus(conn) != CONNECTION_OK) {
-        std::fprintf(stderr, "connection failed: %s", PQerrorMessage(conn));
+        log::error("connection failed: {}", PQerrorMessage(conn));
         PQfinish(conn);
         return 1;
     }
-    std::fprintf(stderr,
-                 "Connected; streaming from slot '%s' via publication '%s'.\n",
-                 slot.c_str(), publication.c_str());
+    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
 
     int exit_code = 1;
     if (start_replication(conn, slot, publication)) {
-        std::fprintf(stderr, "Streaming (Ctrl+C to stop)...\n");
+        log::info("Streaming (Ctrl+C to stop)...");
         exit_code = run_stream(conn);
     }
 
