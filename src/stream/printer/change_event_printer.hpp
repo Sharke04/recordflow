@@ -3,7 +3,7 @@
 #include <chrono>
 
 #include "core/change_event.hpp"
-#include "stream/parser/pgoutput_parser.hpp"
+#include "pgoutput/decoder.hpp"
 
 namespace pgoutput {
 

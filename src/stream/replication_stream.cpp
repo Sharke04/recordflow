@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "config.hpp"
-#include "stream/parser/pgoutput_parser.hpp"
+#include "pgoutput/decoder.hpp"
 #include "stream/printer/change_event_printer.hpp"
 #include "pgoutput/wire.hpp"
 
@@ -91,12 +91,12 @@ struct StreamState {
 };
 
 void handle_xlog_data(PGconn* conn, pgwire::ByteReader& frame,
-                      PgoutputParser& parser, StreamState& state) {
+                      PgoutputDecoder& decoder, StreamState& state) {
     frame.getLong();
     frame.getLong();
     frame.getLong();
     const pgoutput::ParsedMessage msg =
-        parser.handle_message(frame.rest(), frame.remaining());
+        decoder.handle_message(frame.rest(), frame.remaining());
 
     if (msg.relation) {
         print_relation(*msg.relation);
@@ -127,7 +127,7 @@ void handle_keepalive(PGconn* conn, pgwire::ByteReader& frame, StreamState& stat
 }
 
 int run_stream(PGconn* conn) {
-    PgoutputParser parser;
+    PgoutputDecoder decoder;
     StreamState state;
 
     for (;;) {
@@ -149,7 +149,7 @@ int run_stream(PGconn* conn) {
             pgwire::ByteReader frame(buf.data, static_cast<std::size_t>(len));
             switch (frame.get()) {
                 case 'w':
-                    handle_xlog_data(conn, frame, parser, state);
+                    handle_xlog_data(conn, frame, decoder, state);
                     break;
                 case 'k':
                     handle_keepalive(conn, frame, state);

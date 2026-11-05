@@ -58,7 +58,7 @@ struct ParsedMessage {
 
 }
 
-class PgoutputParser {
+class PgoutputDecoder {
 public:
     pgoutput::ParsedMessage handle_message(const char* data, std::size_t len);
 
