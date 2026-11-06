@@ -1,4 +1,4 @@
-#include "stream/replication_stream.hpp"
+#include "app/engine.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -14,7 +14,7 @@
 #include "runtime/log.hpp"
 #include "stream/printer/change_event_printer.hpp"
 
-namespace recordflow {
+namespace recordflow::app {
 
 namespace {
 
@@ -85,7 +85,10 @@ int run_stream(pg::ReplicationConnection& conn) {
 
 }  // namespace
 
-int stream(const std::string& slot, const std::string& publication) {
+Engine::Engine(std::string slot, std::string publication)
+    : slot_(std::move(slot)), publication_(std::move(publication)) {}
+
+int Engine::run() {
     Config config;
     try {
         config = load_config();
@@ -94,11 +97,11 @@ int stream(const std::string& slot, const std::string& publication) {
     }
 
     pg::ReplicationConnection conn(std::move(config.params));
-    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
+    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot_, publication_);
 
-    conn.start(slot, publication);
+    conn.start(slot_, publication_);
     log::info("Streaming (Ctrl+C to stop)...");
     return run_stream(conn);
 }
 
-}  // namespace recordflow
+}  // namespace recordflow::app

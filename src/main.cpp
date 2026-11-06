@@ -1,8 +1,7 @@
-#include "stream/replication_stream.hpp"
-
 #include <cstdio>
 #include <exception>
 
+#include "app/engine.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
 
@@ -18,7 +17,8 @@ int main(int argc, char** argv) {
     }
 
     try {
-        return recordflow::stream(argv[1], argv[2]);
+        recordflow::app::Engine engine(argv[1], argv[2]);
+        return engine.run();
     } catch (const std::exception& e) {
         const ExitCode code = recordflow::exit_code_for(e);
         recordflow::log::error("{} (exit code {})", e.what(), static_cast<int>(code));
