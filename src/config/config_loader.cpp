@@ -2,6 +2,9 @@
 
 #include <toml++/toml.hpp>
 
+#include <charconv>
+#include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <sstream>
@@ -79,6 +82,69 @@ void apply_toml_file(Config& config, const std::string& path) {
     std::ostringstream text;
     text << file.rdbuf();
     apply_toml(config, text.str(), path);
+}
+
+EnvLookup process_environment() {
+    return [](const std::string& name) -> std::optional<std::string> {
+        if (const char* value = std::getenv(name.c_str())) return std::string(value);
+        return std::nullopt;
+    };
+}
+
+void apply_env(Config& config, const EnvLookup& env) {
+    for (const Field& field : fields()) {
+        const std::string name = field.env_name();
+        const std::string file_name = name + "_FILE";
+        std::optional<std::string> value = env(name);
+        const std::optional<std::string> file = env(file_name);
+
+        if (value && file) {
+            throw ConfigError(std::format("set either {} or {}, not both", name, file_name));
+        }
+        std::string origin = name;
+        if (file) {
+            std::ifstream in(*file, std::ios::binary);
+            if (!in) throw ConfigError(std::format("{}: cannot read {}", file_name, *file));
+            std::ostringstream text;
+            text << in.rdbuf();
+            value = text.str();
+            if (value->ends_with("\r\n")) {
+                value->resize(value->size() - 2);
+            } else if (value->ends_with('\n')) {
+                value->pop_back();
+            }
+            origin = file_name;
+        }
+        if (!value) continue;
+
+        try {
+            if (field.kind == FieldKind::Integer) {
+                std::int64_t number = 0;
+                const char* begin = value->data();
+                const char* end = begin + value->size();
+                const auto [ptr, ec] = std::from_chars(begin, end, number);
+                if (ec != std::errc() || ptr != end || value->empty()) {
+                    throw ConfigError(std::format("{}: expected an integer, got '{}'", field.name(), *value));
+                }
+                field.set(config, {}, number, Source::Env);
+            } else {
+                field.set(config, *value, 0, Source::Env);
+            }
+        } catch (const ConfigError& e) {
+            throw ConfigError(std::format("{}: {}", origin, e.what()));
+        }
+    }
+}
+
+Config load(const LoadOptions& options) {
+    Config config;
+    if (options.config_path) {
+        apply_toml_file(config, *options.config_path);
+    } else if (std::filesystem::exists(options.default_path)) {
+        apply_toml_file(config, options.default_path);
+    }
+    apply_env(config, options.env);
+    return config;
 }
 
 }  // namespace recordflow::config
