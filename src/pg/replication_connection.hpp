@@ -5,7 +5,7 @@
 #include <optional>
 #include <string>
 
-#include "config.hpp"
+#include "pg/conninfo.hpp"
 
 struct pg_conn;
 
@@ -33,8 +33,9 @@ private:
 // frames and sending standby status updates.
 class ReplicationConnection {
 public:
-    // Connects; throws TransientError if the server cannot be reached.
-    explicit ReplicationConnection(KeyValues params);
+    // Connects with parameters from build_connection_params(..., Replication);
+    // throws TransientError if the server cannot be reached.
+    explicit ReplicationConnection(const KeyValues& params);
     ~ReplicationConnection();
     ReplicationConnection(const ReplicationConnection&) = delete;
     ReplicationConnection& operator=(const ReplicationConnection&) = delete;

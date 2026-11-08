@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "config.hpp"
+#include "pg/conninfo.hpp"
 #include "pg/replication_connection.hpp"
 #include "pgoutput/decoder.hpp"
 #include "pgoutput/wire.hpp"
@@ -88,19 +88,11 @@ int run_stream(pg::ReplicationConnection& conn) {
 Engine::Engine(config::Config config) : config_(std::move(config)) {}
 
 int Engine::run() {
-    // Connection parameters still come from the legacy recordflow.conf until
-    // the [source] conninfo is wired in.
-    Config legacy;
-    try {
-        legacy = load_config();
-    } catch (const std::exception& e) {
-        throw ConfigError(e.what());
-    }
-
     const std::string& slot = config_.source.slot.value;
     const std::string& publication = config_.source.publication.value;
 
-    pg::ReplicationConnection conn(std::move(legacy.params));
+    pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
+                                                               pg::ConnectionKind::Replication));
     log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
 
     conn.start(slot, publication);
