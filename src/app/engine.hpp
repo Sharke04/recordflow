@@ -1,6 +1,6 @@
 #pragma once
 
-#include <string>
+#include "config/config.hpp"
 
 namespace recordflow::app {
 
@@ -8,15 +8,14 @@ namespace recordflow::app {
 // one slot and prints the decoded events.
 class Engine {
 public:
-    Engine(std::string slot, std::string publication);
+    explicit Engine(config::Config config);
 
     // Returns the process exit code; errors propagate as exceptions from
     // runtime/errors.hpp.
     int run();
 
 private:
-    std::string slot_;
-    std::string publication_;
+    config::Config config_;
 };
 
 }  // namespace recordflow::app
