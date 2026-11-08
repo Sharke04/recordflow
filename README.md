@@ -61,17 +61,23 @@ echo 'export VCPKG_ROOT=$HOME/vcpkg' >> ~/.bashrc
 
 ## Configuration
 
-`recordflow.conf`, read from the working directory, holds **libpq connection keywords only**.
+Recordflow reads a TOML file, `./recordflow.toml` by default (or the path given with `--config`). Only the four `[source]` keys are required:
 
-```ini
-host=localhost
-port=5432
-dbname=mydb
-user=recordflow
-password=changeme
+```toml
+[source]
+conninfo    = "host=localhost port=5432 dbname=mydb user=recordflow"
+slot        = "recordflow_slot"
+publication = "recordflow_pub"
+table       = "public.orders"
 ```
 
-Copy `recordflow.conf.example` to `recordflow.conf` and fill in real values.
+`recordflow.toml.example` lists every key with its default. Copy it to `recordflow.toml` (git-ignored) and adjust.
+
+- **Precedence:** defaults < TOML file < environment < command line.
+- **Environment:** every key can be set as `RECORDFLOW_<SECTION>_<KEY>` (for example `RECORDFLOW_SNAPSHOT_ON_START=if_incomplete`), or as `RECORDFLOW_<SECTION>_<KEY>_FILE` naming a file that holds the value (for Docker secrets). Without a TOML file, the whole configuration can come from the environment.
+- **Secrets:** the PostgreSQL password goes through libpq (`PGPASSWORD` or `~/.pgpass`); the ClickHouse password only through `RECORDFLOW_CLICKHOUSE_PASSWORD` (or `_FILE`) — putting it in the file is an error.
+- **Strict:** unknown sections or keys, wrong types and out-of-range values stop the start with the file and line.
+- `recordflow --check-config` loads and validates the configuration, prints the effective values (with the source of each, secrets masked) and exits.
 
 ---
 
@@ -111,11 +117,12 @@ Without `RECORDFLOW_IT=1`, integration tests are skipped.
 ### 3. Run
 
 ```
-recordflow <slot> <publication>
+recordflow [--config PATH] [--check-config]
 ```
 
 ```bash
-./build/linux/recordflow recordflow_slot recordflow_pub
+cp recordflow.toml.example recordflow.toml
+PGPASSWORD=changeme ./build/linux/recordflow
 ```
 
 Status messages ("Connected…", "Streaming…") go to **stderr**; decoded events go to **stdout**, so the two are easy to separate.
