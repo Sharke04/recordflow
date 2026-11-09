@@ -3,7 +3,7 @@
 #include <chrono>
 
 #include "core/change_event.hpp"
-#include "pgoutput/decoder.hpp"
+#include "pgoutput/messages.hpp"
 
 namespace recordflow::pgoutput {
 
@@ -12,11 +12,14 @@ inline constexpr std::chrono::sys_days kPostgresEpoch {
     std::chrono::year{2000} / std::chrono::January / 1
 };
 
-}
+}  // namespace recordflow::pgoutput
 
 namespace recordflow {
 
 void print_change_event(const core::ChangeEvent& event);
 void print_relation(const pgoutput::TableInfo& table);
+void print_begin(const pgoutput::Begin& begin);
+void print_commit(const pgoutput::Commit& commit);
+void print_other(const pgoutput::Other& other);
 
 }  // namespace recordflow

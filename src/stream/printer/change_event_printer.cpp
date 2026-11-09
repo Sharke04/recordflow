@@ -12,7 +12,8 @@ namespace recordflow {
 
 namespace {
 
-using namespace pgoutput;
+using namespace core;
+using pgoutput::kPostgresEpoch;
 
 const char* op_name(Op op) {
     switch (op) {
@@ -96,6 +97,34 @@ void print_change_event(const core::ChangeEvent& event) {
     std::printf("  commit_ts   = %s\n", format_timestamp(event.commit_ts).c_str());
     std::printf("  before      = %s\n", format_row(event.before).c_str());
     std::printf("  after       = %s\n", format_row(event.after).c_str());
+    std::fflush(stdout);
+}
+
+void print_begin(const pgoutput::Begin& begin) {
+    std::printf("BEGIN    xid=%u lsn=%s ts=%s\n", begin.xid, core::format_lsn(begin.final_lsn).c_str(),
+                format_timestamp(begin.commit_ts).c_str());
+    std::fflush(stdout);
+}
+
+void print_commit(const pgoutput::Commit& commit) {
+    std::printf("COMMIT   lsn=%s end=%s ts=%s\n", core::format_lsn(commit.commit_lsn).c_str(),
+                core::format_lsn(commit.end_lsn).c_str(), format_timestamp(commit.commit_ts).c_str());
+    std::fflush(stdout);
+}
+
+void print_other(const pgoutput::Other& other) {
+    switch (other.type) {
+        case 'O':
+            std::printf("ORIGIN   (not decoded)\n");
+            break;
+        case 'Y':
+            std::printf("TYPE     (not decoded)\n");
+            break;
+        default:
+            std::printf("?        message type '%c' (0x%02x)\n", other.type,
+                        static_cast<unsigned char>(other.type));
+            break;
+    }
     std::fflush(stdout);
 }
 
