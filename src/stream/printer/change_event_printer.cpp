@@ -112,6 +112,13 @@ void print_commit(const pgoutput::Commit& commit) {
     std::fflush(stdout);
 }
 
+void print_logical_message(const pgoutput::LogicalMessage& message) {
+    std::printf("MESSAGE  prefix=%s lsn=%s transactional=%s content=%s\n", message.prefix.c_str(),
+                core::format_lsn(message.lsn).c_str(), message.transactional ? "yes" : "no",
+                message.content.c_str());
+    std::fflush(stdout);
+}
+
 void print_other(const pgoutput::Other& other) {
     switch (other.type) {
         case 'O':

@@ -21,5 +21,6 @@ void print_relation(const pgoutput::TableInfo& table);
 void print_begin(const pgoutput::Begin& begin);
 void print_commit(const pgoutput::Commit& commit);
 void print_other(const pgoutput::Other& other);
+void print_logical_message(const pgoutput::LogicalMessage& message);
 
 }  // namespace recordflow

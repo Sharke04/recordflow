@@ -71,7 +71,7 @@ void handle_message(pg::ReplicationConnection& conn, const pgoutput::Message& me
                            print_change_event(event_for(core::Op::Truncate, *table, state.current));
                        }
                    },
-                   [&](const pgoutput::LogicalMessage&) {},
+                   [&](const pgoutput::LogicalMessage& message) { print_logical_message(message); },
                    [&](const pgoutput::Other& other) { print_other(other); },
                },
                message);

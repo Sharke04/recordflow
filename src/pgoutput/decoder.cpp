@@ -41,6 +41,15 @@ Message PgoutputDecoder::decode(const char* data, std::size_t len) {
             return decode_change(buf, Op::Delete);
         case 'T':
             return decode_truncate(buf);
+        case 'M': {
+            // Protocol version 1: no xid, since transactions are never streamed.
+            LogicalMessage message;
+            message.transactional = (buf.get() & 0x01) != 0;
+            message.lsn = static_cast<core::Lsn>(buf.getLong());
+            message.prefix = buf.getString();
+            message.content = buf.getCountedBytes();
+            return message;
+        }
         default:
             return Other{type};
     }
