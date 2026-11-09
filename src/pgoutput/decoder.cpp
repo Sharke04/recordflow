@@ -163,7 +163,7 @@ ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len)
                     event.table = relation_label(oid);
                 }
                 event.xid = transaction_.xid;
-                event.lsn = transaction_.lsn;
+                event.version.commit_lsn = transaction_.lsn;
                 event.commit_ts = transaction_.commit_ts;
                 parsed.events.push_back(std::move(event));
                 break;
@@ -208,7 +208,7 @@ ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len)
                         event.table = relation_label(oid);
                     }
                     event.xid = transaction_.xid;
-                    event.lsn = transaction_.lsn;
+                    event.version.commit_lsn = transaction_.lsn;
                     event.commit_ts = transaction_.commit_ts;
                     parsed.events.push_back(std::move(event));
                 }
