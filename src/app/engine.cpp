@@ -1,6 +1,7 @@
 #include "app/engine.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <string>
@@ -75,7 +76,10 @@ int run_stream(pg::ReplicationConnection& conn) {
     pgoutput::PgoutputDecoder decoder;
     StreamState state;
 
-    while (auto copy = conn.read()) {
+    constexpr std::chrono::milliseconds kPollInterval{200};
+    while (!conn.ended()) {
+        const auto copy = conn.poll(kPollInterval);
+        if (!copy) continue;  // nothing arrived; timers and signals are checked here later
         try {
             pgoutput::ByteReader frame(copy->data(), copy->size());
             switch (frame.get()) {
