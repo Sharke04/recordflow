@@ -7,6 +7,7 @@
 #include <utility>
 #include <variant>
 
+#include "core/transaction_assembler.hpp"
 #include "pg/conninfo.hpp"
 #include "pg/replication_connection.hpp"
 #include "pgoutput/decoder.hpp"
@@ -26,49 +27,29 @@ struct Overloaded : Handlers... {
 
 struct StreamState {
     core::Lsn confirmed = 0;
-    bool in_transaction = false;
-    pgoutput::Begin current;
+    core::TransactionAssembler assembler;
 };
-
-core::ChangeEvent event_for(core::Op op, const pgoutput::TableInfo& table,
-                            const pgoutput::Begin& transaction) {
-    core::ChangeEvent event;
-    event.op = op;
-    event.schema_name = table.schema;
-    event.table = table.name;
-    for (const auto& column : table.columns) {
-        if (column.part_of_key) event.key_columns.push_back(column.name);
-    }
-    event.xid = transaction.xid;
-    event.version.commit_lsn = transaction.final_lsn;
-    event.commit_ts = transaction.commit_ts;
-    return event;
-}
 
 void handle_message(pg::ReplicationConnection& conn, const pgoutput::Message& message,
                     StreamState& state) {
     std::visit(Overloaded{
                    [&](const pgoutput::Begin& begin) {
-                       state.in_transaction = true;
-                       state.current = begin;
+                       state.assembler.begin(begin);
                        print_begin(begin);
                    },
                    [&](const pgoutput::Commit& commit) {
-                       state.in_transaction = false;
+                       state.assembler.commit(commit);
                        print_commit(commit);
                        state.confirmed = std::max(state.confirmed, commit.end_lsn);
                        conn.send_standby_status(state.confirmed);
                    },
                    [&](const pgoutput::Relation& relation) { print_relation(*relation.table); },
                    [&](const pgoutput::Change& change) {
-                       core::ChangeEvent event = event_for(change.op, *change.table, state.current);
-                       event.before = change.before;
-                       event.after = change.after;
-                       print_change_event(event);
+                       print_change_event(state.assembler.change(change));
                    },
                    [&](const pgoutput::Truncate& truncate) {
-                       for (const auto& table : truncate.tables) {
-                           print_change_event(event_for(core::Op::Truncate, *table, state.current));
+                       for (const auto& event : state.assembler.truncate(truncate)) {
+                           print_change_event(event);
                        }
                    },
                    [&](const pgoutput::LogicalMessage& message) { print_logical_message(message); },
@@ -82,7 +63,7 @@ void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& fra
     const auto wal_end = static_cast<core::Lsn>(frame.getLong());
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
-    if (!state.in_transaction) {
+    if (!state.assembler.in_transaction()) {
         state.confirmed = std::max(state.confirmed, wal_end);
     }
     if (reply_requested) {
