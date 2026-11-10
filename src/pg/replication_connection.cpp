@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "pgoutput/wire.hpp"
+#include "pg/errors.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
 
@@ -46,10 +47,13 @@ CopyData::~CopyData() {
 
 ReplicationConnection::ReplicationConnection(const KeyValues& params) : conn_(connect(params)) {
     if (PQstatus(conn_) != CONNECTION_OK) {
-        const std::string error = PQerrorMessage(conn_);
-        PQfinish(conn_);
-        conn_ = nullptr;
-        throw TransientError(Resource::PostgresReplication, "connection failed: " + error);
+        try {
+            raise(Resource::PostgresReplication, "replication connection failed", conn_);
+        } catch (...) {
+            PQfinish(conn_);
+            conn_ = nullptr;
+            throw;
+        }
     }
 }
 
@@ -63,12 +67,16 @@ void ReplicationConnection::start(const std::string& slot, const std::string& pu
         " (proto_version '1', publication_names '\"" + publication + "\"')";
 
     PGresult* res = PQexec(conn_, command.c_str());
-    const bool ok = res && PQresultStatus(res) == PGRES_COPY_BOTH;
-    PQclear(res);
-
-    if (!ok)
-        throw InterventionError(std::string("could not start replication: ") +
-                                PQerrorMessage(conn_));
+    if (res != nullptr && PQresultStatus(res) == PGRES_COPY_BOTH) {
+        PQclear(res);
+        return;
+    }
+    try {
+        raise(Resource::PostgresReplication, "could not start replication", conn_, res);
+    } catch (...) {
+        PQclear(res);
+        throw;
+    }
 }
 
 std::optional<CopyData> ReplicationConnection::read() {
@@ -76,11 +84,26 @@ std::optional<CopyData> ReplicationConnection::read() {
         char* data = nullptr;
         const int len = PQgetCopyData(conn_, &data, 0);
         if (len > 0) return CopyData(data, static_cast<std::size_t>(len));
-        if (len == -1) return std::nullopt;
-        if (len == -2) {
-            throw TransientError(Resource::PostgresReplication,
-                                 std::string("stream read failed: ") + PQerrorMessage(conn_));
+        if (len == -1) {
+            finish_copy();
+            return std::nullopt;
         }
+        if (len == -2) raise(Resource::PostgresReplication, "stream read failed", conn_);
+    }
+}
+
+void ReplicationConnection::finish_copy() {
+    // The server ended COPY; an error (e.g. an invalidated slot) arrives as a result.
+    while (PGresult* res = PQgetResult(conn_)) {
+        if (PQresultStatus(res) == PGRES_FATAL_ERROR) {
+            try {
+                raise(Resource::PostgresReplication, "replication stream ended with an error", conn_, res);
+            } catch (...) {
+                PQclear(res);
+                throw;
+            }
+        }
+        PQclear(res);
     }
 }
 

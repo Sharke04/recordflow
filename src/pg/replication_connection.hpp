@@ -40,7 +40,8 @@ public:
     ReplicationConnection(const ReplicationConnection&) = delete;
     ReplicationConnection& operator=(const ReplicationConnection&) = delete;
 
-    // Throws InterventionError if the server refuses (e.g. missing slot).
+    // Errors are classified by pg/errors (e.g. a missing slot: InterventionError,
+    // a slot used by another walsender: SlotBusyError).
     void start(const std::string& slot, const std::string& publication);
 
     // Blocks until the next frame; std::nullopt when the server ended the
@@ -51,6 +52,8 @@ public:
     void send_standby_status(std::uint64_t lsn);
 
 private:
+    void finish_copy();
+
     pg_conn* conn_ = nullptr;
 };
 
