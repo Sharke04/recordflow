@@ -27,7 +27,6 @@ struct Overloaded : Handlers... {
 };
 
 struct StreamState {
-    core::Lsn confirmed = 0;
     core::TransactionAssembler assembler;
 };
 
@@ -41,8 +40,7 @@ void handle_message(pg::ReplicationConnection& conn, const pgoutput::Message& me
                    [&](const pgoutput::Commit& commit) {
                        state.assembler.commit(commit);
                        print_commit(commit);
-                       state.confirmed = std::max(state.confirmed, commit.end_lsn);
-                       conn.send_standby_status(state.confirmed);
+                       conn.confirm(commit.end_lsn);
                    },
                    [&](const pgoutput::Relation& relation) { print_relation(*relation.table); },
                    [&](const pgoutput::Change& change) {
@@ -65,11 +63,9 @@ void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& fra
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
     if (!state.assembler.in_transaction()) {
-        state.confirmed = std::max(state.confirmed, wal_end);
+        conn.confirm(wal_end);
     }
-    if (reply_requested) {
-        conn.send_standby_status(state.confirmed);
-    }
+    conn.maybe_send_status(std::chrono::steady_clock::now(), reply_requested);
 }
 
 int run_stream(pg::ReplicationConnection& conn) {
@@ -79,6 +75,7 @@ int run_stream(pg::ReplicationConnection& conn) {
     constexpr std::chrono::milliseconds kPollInterval{200};
     while (!conn.ended()) {
         const auto copy = conn.poll(kPollInterval);
+        conn.maybe_send_status(std::chrono::steady_clock::now());
         if (!copy) continue;  // nothing arrived; timers and signals are checked here later
         try {
             pgoutput::ByteReader frame(copy->data(), copy->size());
