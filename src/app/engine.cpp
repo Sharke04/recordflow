@@ -10,6 +10,7 @@
 
 #include "core/transaction_assembler.hpp"
 #include "pg/conninfo.hpp"
+#include "pg/query_connection.hpp"
 #include "pg/replication_connection.hpp"
 #include "pgoutput/decoder.hpp"
 #include "pgoutput/wire.hpp"
@@ -105,6 +106,12 @@ Engine::Engine(config::Config config) : config_(std::move(config)) {}
 int Engine::run() {
     const std::string& slot = config_.source.slot.value;
     const std::string& publication = config_.source.publication.value;
+
+    pg::QueryConnection query(pg::build_connection_params(config_.source.conninfo.value,
+                                                          pg::ConnectionKind::Query));
+    const pg::QueryResult who = query.exec("SELECT current_user, current_setting('server_version')");
+    log::info("Query connection open as '{}' (PostgreSQL {}).", who.rows[0][0].value_or("?"),
+              who.rows[0][1].value_or("?"));
 
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
                                                                pg::ConnectionKind::Replication));
