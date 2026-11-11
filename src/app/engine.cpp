@@ -111,9 +111,11 @@ int Engine::run() {
 
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
                                                                pg::ConnectionKind::Replication));
-    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
+    const pg::SystemIdentity identity = conn.identify_system();
+    log::info("Connected to system {} (timeline {}, WAL at {}); streaming from slot '{}' via publication '{}'.",
+              identity.system_id, identity.timeline, core::format_lsn(identity.xlogpos), slot, publication);
 
-    conn.start(slot, publication);
+    conn.start(slot, publication, /*start_lsn=*/0);
     log::info("Streaming (Ctrl+C to stop)...");
     return run_stream(conn);
 }

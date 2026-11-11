@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <format>
 
 #include <utility>
 #include <vector>
@@ -65,10 +66,47 @@ ReplicationConnection::~ReplicationConnection() {
     if (conn_ != nullptr) PQfinish(conn_);
 }
 
-void ReplicationConnection::start(const std::string& slot, const std::string& publication) {
-    const std::string command =
-        "START_REPLICATION SLOT " + slot + " LOGICAL 0/0"
-        " (proto_version '1', publication_names '\"" + publication + "\"')";
+SystemIdentity ReplicationConnection::identify_system() {
+    PGresult* res = PQexec(conn_, "IDENTIFY_SYSTEM");
+    if (res == nullptr || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1 ||
+        PQnfields(res) < 4) {
+        try {
+            raise(Resource::PostgresReplication, "IDENTIFY_SYSTEM failed", conn_, res);
+        } catch (...) {
+            PQclear(res);
+            throw;
+        }
+    }
+    SystemIdentity identity;
+    identity.system_id = PQgetvalue(res, 0, 0);
+    identity.timeline = static_cast<std::uint32_t>(std::stoul(PQgetvalue(res, 0, 1)));
+    identity.xlogpos = core::parse_lsn(PQgetvalue(res, 0, 2)).value_or(0);
+    identity.dbname = PQgetisnull(res, 0, 3) ? "" : PQgetvalue(res, 0, 3);
+    PQclear(res);
+    return identity;
+}
+
+std::string ReplicationConnection::escape_identifier(const std::string& name) {
+    char* escaped = PQescapeIdentifier(conn_, name.c_str(), name.size());
+    if (escaped == nullptr) raise(Resource::PostgresReplication, "cannot escape identifier", conn_);
+    std::string result = escaped;
+    PQfreemem(escaped);
+    return result;
+}
+
+std::string ReplicationConnection::escape_literal(const std::string& text) {
+    char* escaped = PQescapeLiteral(conn_, text.c_str(), text.size());
+    if (escaped == nullptr) raise(Resource::PostgresReplication, "cannot escape literal", conn_);
+    std::string result = escaped;
+    PQfreemem(escaped);
+    return result;
+}
+
+void ReplicationConnection::start(const std::string& slot, const std::string& publication,
+                                  core::Lsn start_lsn) {
+    const std::string command = std::format(
+        "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names {}, messages 'true')",
+        escape_identifier(slot), core::format_lsn(start_lsn), escape_literal(escape_identifier(publication)));
 
     PGresult* res = PQexec(conn_, command.c_str());
     if (res != nullptr && PQresultStatus(res) == PGRES_COPY_BOTH) {
