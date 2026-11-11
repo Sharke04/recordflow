@@ -4,11 +4,13 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <format>
 #include <string>
 #include <utility>
 #include <variant>
 
 #include "core/transaction_assembler.hpp"
+#include "pg/catalog.hpp"
 #include "pg/conninfo.hpp"
 #include "pg/query_connection.hpp"
 #include "pg/replication_connection.hpp"
@@ -69,9 +71,10 @@ void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& fra
     conn.maybe_send_status(std::chrono::steady_clock::now(), reply_requested);
 }
 
-int run_stream(pg::ReplicationConnection& conn) {
+int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table) {
     pgoutput::PgoutputDecoder decoder;
     StreamState state;
+    state.assembler.set_primary_key(table.qualified(), table.primary_key);
 
     constexpr std::chrono::milliseconds kPollInterval{200};
     while (!conn.ended()) {
@@ -113,6 +116,16 @@ int Engine::run() {
     log::info("Query connection open as '{}' (PostgreSQL {}).", who.rows[0][0].value_or("?"),
               who.rows[0][1].value_or("?"));
 
+    const core::TableSchema table = pg::read_table_schema(query, config_.source.table.value);
+    std::string columns;
+    for (const auto& column : table.columns) {
+        columns += std::format("{}{} {}{}", columns.empty() ? "" : ", ", column.name, column.type_name,
+                               column.not_null ? " not null" : "");
+    }
+    std::string key;
+    for (const auto& name : table.primary_key) key += (key.empty() ? "" : ", ") + name;
+    log::info("Source table {}: primary key ({}); columns: {}", table.qualified(), key, columns);
+
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
                                                                pg::ConnectionKind::Replication));
     const pg::SystemIdentity identity = conn.identify_system();
@@ -121,7 +134,7 @@ int Engine::run() {
 
     conn.start(slot, publication, /*start_lsn=*/0);
     log::info("Streaming (Ctrl+C to stop)...");
-    return run_stream(conn);
+    return run_stream(conn, table);
 }
 
 }  // namespace recordflow::app
