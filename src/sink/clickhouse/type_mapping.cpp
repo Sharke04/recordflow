@@ -6,7 +6,9 @@ namespace recordflow::sink::clickhouse {
 
 namespace {
 
-constexpr int kMaxDecimalPrecision = 76;
+// clickhouse-cpp appends decimals as Int128, which covers Decimal(38, s);
+// wider numerics are stored as String.
+constexpr int kMaxDecimalPrecision = 38;
 
 // numeric(p, s) typmod: ((p << 16) | (s & 0x7ff)) + 4; scale is an 11-bit
 // signed value since PostgreSQL 15.
