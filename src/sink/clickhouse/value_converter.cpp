@@ -4,6 +4,7 @@
 #include <clickhouse/columns/date.h>
 #include <clickhouse/columns/decimal.h>
 #include <clickhouse/columns/lowcardinality.h>
+#include <clickhouse/columns/nullable.h>
 #include <clickhouse/columns/string.h>
 #include <clickhouse/columns/uuid.h>
 
@@ -14,6 +15,7 @@
 #include <limits>
 #include <utility>
 
+#include "runtime/errors.hpp"
 #include "runtime/log.hpp"
 
 namespace recordflow::sink::clickhouse {
@@ -267,15 +269,76 @@ bool parse_bool(std::string_view text, const std::string& column) {
 }  // namespace
 
 ColumnBuilder::ColumnBuilder(std::string name, ChType type)
-    : name_(std::move(name)), type_(type), nested_(make_column(type)) {}
+    : name_(std::move(name)),
+      type_(type),
+      nested_(make_column(type)),
+      nulls_(type.nullable ? std::make_shared<ch::ColumnUInt8>() : nullptr) {}
 
 AppendOutcome ColumnBuilder::append(const core::Value& value) {
-    if (value.kind != core::Value::Kind::Text) {
-        throw ConversionError(std::format("column {}: NULL and unchanged values are not supported yet", name_));
+    switch (value.kind) {
+        case core::Value::Kind::Null:
+            if (!type_.nullable) {
+                throw SchemaChangeError(
+                    std::format("column {} received NULL, but its ClickHouse type {} is not Nullable", name_,
+                                type_.name()),
+                    std::format("~ column \"{}\": NOT NULL was dropped on the source", name_));
+            }
+            append_null();
+            return AppendOutcome::Ok;
+        case core::Value::Kind::UnchangedToast:
+            append_default();
+            return AppendOutcome::UnchangedToast;
+        case core::Value::Kind::Text:
+            break;
     }
+
+    const bool temporal = type_.kind == ChKind::Date32 || type_.kind == ChKind::DateTime64 ||
+                          type_.kind == ChKind::DateTime64Utc;
+    if (temporal && type_.nullable && (value.text == "infinity" || value.text == "-infinity")) {
+        log::warn("column {}: '{}' has no ClickHouse equivalent, stored as NULL", name_, value.text);
+        append_null();
+        return AppendOutcome::Ok;
+    }
+
     append_text(value.text);
+    if (nulls_) nulls_->Append(0);
     ++size_;
     return AppendOutcome::Ok;
+}
+
+void ColumnBuilder::append_default() {
+    if (type_.nullable) {
+        append_null();
+        return;
+    }
+    append_nested_default();
+    ++size_;
+}
+
+void ColumnBuilder::append_null() {
+    append_nested_default();
+    nulls_->Append(1);
+    ++size_;
+}
+
+void ColumnBuilder::append_nested_default() {
+    switch (type_.kind) {
+        case ChKind::Int16:         nested_->As<ch::ColumnInt16>()->Append(0); return;
+        case ChKind::Int32:         nested_->As<ch::ColumnInt32>()->Append(0); return;
+        case ChKind::Int64:         nested_->As<ch::ColumnInt64>()->Append(0); return;
+        case ChKind::Float32:       nested_->As<ch::ColumnFloat32>()->Append(0); return;
+        case ChKind::Float64:       nested_->As<ch::ColumnFloat64>()->Append(0); return;
+        case ChKind::Bool:          nested_->As<ch::ColumnBool>()->Append(false); return;
+        case ChKind::Decimal:       nested_->As<ch::ColumnDecimal>()->Append(ch::Int128(0)); return;
+        case ChKind::Date32:        nested_->As<ch::ColumnDate32>()->AppendRaw(0); return;
+        case ChKind::DateTime64:
+        case ChKind::DateTime64Utc: nested_->As<ch::ColumnDateTime64>()->Append(0); return;
+        case ChKind::Uuid:          nested_->As<ch::ColumnUUID>()->Append(ch::UUID{0, 0}); return;
+        case ChKind::LowCardinalityString:
+            nested_->As<ch::ColumnLowCardinalityT<ch::ColumnString>>()->Append(std::string_view{});
+            return;
+        case ChKind::String:        nested_->As<ch::ColumnString>()->Append(std::string_view{}); return;
+    }
 }
 
 void ColumnBuilder::append_text(std::string_view text) {
@@ -335,7 +398,9 @@ void ColumnBuilder::append_text(std::string_view text) {
 ch::ColumnRef ColumnBuilder::take() {
     ch::ColumnRef finished = std::exchange(nested_, make_column(type_));
     size_ = 0;
-    return finished;
+    if (!nulls_) return finished;
+    auto nulls = std::exchange(nulls_, std::make_shared<ch::ColumnUInt8>());
+    return std::make_shared<ch::ColumnNullable>(finished, nulls);
 }
 
 }  // namespace recordflow::sink::clickhouse
