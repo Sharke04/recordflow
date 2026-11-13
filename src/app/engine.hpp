@@ -5,7 +5,7 @@
 namespace recordflow::app {
 
 // Owns all components and runs the main loop (decision 9). For now it streams
-// one slot and prints the decoded events.
+// one slot into the configured sink.
 class Engine {
 public:
     explicit Engine(config::Config config);

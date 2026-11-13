@@ -21,7 +21,7 @@ Two properties define the design:
 
 **The application creates zero database objects.** You create the publication and replication slot yourself; Recordflow only issues `START_REPLICATION`, which makes it safe to point at a database you don't own.
 
-**One connection, print-only.** A single `replication=database` connection carries the stream. Decoded events are printed to stdout, and the slot is advanced as they are, so each run resumes where the last one stopped.
+**One connection, batched output.** A single `replication=database` connection carries the stream. Events are buffered per transaction and written in batches (`[batch]` limits); the slot is advanced only after a batch is written, so each run resumes where the last one stopped.
 
 ---
 
@@ -125,9 +125,9 @@ cp recordflow.toml.example recordflow.toml
 PGPASSWORD=changeme ./build/linux/recordflow
 ```
 
-Status messages ("Connected…", "Streaming…") go to **stderr**; decoded events go to **stdout**, so the two are easy to separate.
+Status messages ("Connected…", "Streaming…") go to **stderr**; with `output.sink = "jsonl"` events go to **stdout** as JSON Lines, one object per row change (`op`, `source`, `schema`, `table`, `key`, `before`, `after`, `version`, `commit_ts`, `xid`), so the two are easy to separate.
 
-Stop with Ctrl+C. Verify the slot moved: `SELECT confirmed_flush_lsn FROM pg_replication_slots;` should have advanced to the last commit's end LSN, and a re-run resumes rather than replaying.
+Stop with Ctrl+C. Verify the slot moved: `SELECT confirmed_flush_lsn FROM pg_replication_slots;` should have advanced to the end LSN of the last written batch, and a re-run resumes rather than replaying.
 
 ---
 

@@ -55,8 +55,8 @@ add_library(recordflow_core
     src/sink/clickhouse/type_mapping.cpp
     src/sink/clickhouse/value_converter.cpp
     src/sink/flush_policy.cpp
-    src/sink/tx_buffer.cpp
-    src/stream/printer/change_event_printer.cpp)
+    src/sink/jsonl/jsonl_sink.cpp
+    src/sink/tx_buffer.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
 target_link_libraries(recordflow_core

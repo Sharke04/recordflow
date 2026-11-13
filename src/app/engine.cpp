@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -18,7 +19,9 @@
 #include "pgoutput/wire.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
-#include "stream/printer/change_event_printer.hpp"
+#include "sink/flush_policy.hpp"
+#include "sink/jsonl/jsonl_sink.hpp"
+#include "sink/sink.hpp"
 
 namespace recordflow::app {
 
@@ -31,73 +34,100 @@ struct Overloaded : Handlers... {
 
 struct StreamState {
     core::TransactionAssembler assembler;
+    sink::Sink& sink;
+    sink::FlushPolicy policy;
 };
 
-void handle_message(pg::ReplicationConnection& conn, const pgoutput::Message& message,
-                    StreamState& state) {
+void handle_message(const pgoutput::Message& message, StreamState& state) {
     std::visit(Overloaded{
                    [&](const pgoutput::Begin& begin) {
                        state.assembler.begin(begin);
-                       print_begin(begin);
+                       state.sink.begin();
                    },
                    [&](const pgoutput::Commit& commit) {
                        state.assembler.commit(commit);
-                       print_commit(commit);
-                       conn.confirm(commit.end_lsn);
+                       state.sink.commit(commit.end_lsn);
                    },
-                   [&](const pgoutput::Relation& relation) { print_relation(*relation.table); },
-                   [&](const pgoutput::Change& change) {
-                       print_change_event(state.assembler.change(change));
+                   [&](const pgoutput::Relation& relation) {
+                       log::debug("Relation {}.{} (oid {}, {} columns)", relation.table->schema,
+                                  relation.table->name, relation.table->oid, relation.table->columns.size());
                    },
+                   [&](const pgoutput::Change& change) { state.sink.append(state.assembler.change(change)); },
                    [&](const pgoutput::Truncate& truncate) {
-                       for (const auto& event : state.assembler.truncate(truncate)) {
-                           print_change_event(event);
-                       }
+                       for (const auto& event : state.assembler.truncate(truncate)) state.sink.append(event);
                    },
-                   [&](const pgoutput::LogicalMessage& message) { print_logical_message(message); },
-                   [&](const pgoutput::Other& other) { print_other(other); },
+                   [&](const pgoutput::LogicalMessage& message) {
+                       log::debug("Logical message '{}' at {}", message.prefix, core::format_lsn(message.lsn));
+                   },
+                   [&](const pgoutput::Other& other) { log::debug("Ignoring message type '{}'", other.type); },
                },
                message);
 }
 
-void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& frame,
-                      StreamState& state) {
+// Writes the buffer and confirms what is stored: the slot moves only after a
+// flush (decision 4.5), never on a Commit alone.
+void flush_and_confirm(pg::ReplicationConnection& conn, StreamState& state, bool include_open) {
+    const std::optional<core::Lsn> stored = state.sink.flush(include_open);
+    if (stored) conn.confirm(*stored);
+}
+
+void maybe_flush(pg::ReplicationConnection& conn, StreamState& state) {
+    switch (state.policy.decide(state.sink.stats(), state.sink.in_transaction(), std::chrono::steady_clock::now())) {
+        case sink::FlushDecision::None:
+            break;
+        case sink::FlushDecision::Complete:
+            flush_and_confirm(conn, state, false);
+            break;
+        case sink::FlushDecision::Oversized:
+            flush_and_confirm(conn, state, true);
+            break;
+    }
+}
+
+void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& frame, StreamState& state) {
     const auto wal_end = static_cast<core::Lsn>(frame.getLong());
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
-    if (!state.assembler.in_transaction()) {
-        conn.confirm(wal_end);
-    }
+    // With nothing buffered, everything up to the server's WAL end is stored
+    // (decision 4.5 rule 6).
+    if (!state.sink.in_transaction() && state.sink.stats().rows == 0) conn.confirm(wal_end);
     conn.maybe_send_status(std::chrono::steady_clock::now(), reply_requested);
 }
 
-int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table) {
+int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table, StreamState& state) {
     pgoutput::PgoutputDecoder decoder;
-    StreamState state;
     state.assembler.set_primary_key(table.qualified(), table.primary_key);
 
     constexpr std::chrono::milliseconds kPollInterval{200};
     while (!conn.ended()) {
         const auto copy = conn.poll(kPollInterval);
-        conn.maybe_send_status(std::chrono::steady_clock::now());
-        if (!copy) continue;  // nothing arrived; timers and signals are checked here later
-        try {
+        if (copy) {
             pgoutput::ByteReader frame(copy->data(), copy->size());
             switch (frame.get()) {
-                case 'w':
+                case 'w': {
                     frame.getLong();  // start of WAL data
                     frame.getLong();  // current end of WAL
                     frame.getLong();  // send time
-                    handle_message(conn, decoder.decode(frame.rest(), frame.remaining()), state);
+                    std::optional<pgoutput::Message> message;
+                    try {
+                        message = decoder.decode(frame.rest(), frame.remaining());
+                    } catch (const std::exception& e) {
+                        log::warn("skipping malformed frame: {}", e.what());
+                    }
+                    if (message) handle_message(*message, state);
                     break;
+                }
                 case 'k':
                     handle_keepalive(conn, frame, state);
                     break;
             }
-        } catch (const std::exception& e) {
-            log::warn("skipping malformed frame: {}", e.what());
         }
+        maybe_flush(conn, state);
+        conn.maybe_send_status(std::chrono::steady_clock::now());
     }
+    if (state.sink.in_transaction()) state.sink.abort();
+    flush_and_confirm(conn, state, false);
+    conn.maybe_send_status(std::chrono::steady_clock::now(), true);
     log::info("Stream ended.");
     return 0;
 }
@@ -134,9 +164,17 @@ int Engine::run() {
     log::info("Connected to system {} (timeline {}, WAL at {}); streaming from slot '{}' via publication '{}'.",
               identity.system_id, identity.timeline, core::format_lsn(identity.xlogpos), slot, publication);
 
+    if (config_.output.sink.value == config::SinkKind::ClickHouse) {
+        log::warn("The ClickHouse sink is not available yet; writing JSON Lines to stdout.");
+    }
+    sink::jsonl::JsonlSink sink;
+    sink.prepare(table);
+    StreamState state{core::TransactionAssembler{}, sink,
+                      sink::FlushPolicy(sink::FlushLimits::from(config_.batch))};
+
     conn.start(slot, publication, /*start_lsn=*/0);
     log::info("Streaming (Ctrl+C to stop)...");
-    return run_stream(conn, table);
+    return run_stream(conn, table, state);
 }
 
 }  // namespace recordflow::app
