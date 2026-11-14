@@ -17,6 +17,16 @@ std::string quote_identifier(std::string_view name) {
     return quoted;
 }
 
+std::string quote_string(std::string_view text) {
+    std::string quoted = "'";
+    for (char ch : text) {
+        if (ch == '\'' || ch == '\\') quoted += '\\';
+        quoted += ch;
+    }
+    quoted += '\'';
+    return quoted;
+}
+
 std::string target_table_name(const config::ClickHouseSection& section, const core::TableSchema& source) {
     if (!section.table.value.empty()) return section.table.value;
     return source.schema + "__" + source.name;
