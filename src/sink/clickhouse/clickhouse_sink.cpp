@@ -107,6 +107,7 @@ InterventionError ClickHouseSink::missing_database() const {
 PrepareResult ClickHouseSink::prepare(const core::TableSchema& source) {
     source_ = source;
     table_ = target_table_name(section_, source);
+    rows_.emplace(source);
     const std::string& database = section_.database.value;
 
     try {

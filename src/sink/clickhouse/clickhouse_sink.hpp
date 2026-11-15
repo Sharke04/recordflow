@@ -8,6 +8,7 @@
 #include "core/table_schema.hpp"
 #include "runtime/errors.hpp"
 #include "sink/clickhouse/client.hpp"
+#include "sink/clickhouse/table_sink.hpp"
 #include "sink/sink.hpp"
 #include "sink/tx_buffer.hpp"
 
@@ -56,6 +57,7 @@ private:
     Client client_;
     std::string table_;
     core::TableSchema source_;
+    std::optional<TableSink> rows_;  // set by prepare()
     TxBuffer buffer_;
 };
 
