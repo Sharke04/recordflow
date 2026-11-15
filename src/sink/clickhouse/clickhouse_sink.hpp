@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -36,7 +37,8 @@ public:
     BufferStats stats() const override { return buffer_.stats(); }
     bool in_transaction() const override { return buffer_.in_transaction(); }
 
-    // One INSERT of one Block per flush. Transient errors reset the connection
+    // One INSERT of one Block per flush (one more per TRUNCATE in between,
+    // which is applied at its position). Transient errors reset the connection
     // and retry the same Block with backoff, without a limit (decision 8.3);
     // the stream is not read meanwhile (decision 4.6).
     std::optional<core::Lsn> flush(bool include_open = false) override;
@@ -52,7 +54,9 @@ private:
         core::SchemaDiff meta_diff;  // Recordflow's own columns, if changed by hand
     };
 
-    void insert(const ::clickhouse::Block& block);
+    // Retries `write` with backoff while it fails with a TransientError.
+    void with_retry(const std::function<void()>& write);
+    void write_rows();  // the rows added so far, as one INSERT
     bool database_exists();
     InterventionError missing_database() const;
     std::optional<ExistingTable> read_table();
