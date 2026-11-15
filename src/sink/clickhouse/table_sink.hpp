@@ -23,9 +23,12 @@ class TableSink {
 public:
     explicit TableSink(const core::TableSchema& source);
 
-    // An insert, update or snapshot row: the event's `after` image, written
-    // as the current state of its key.
-    void add_upsert(const core::ChangeEvent& event);
+    // One row change (decision 2.5):
+    //  - insert, update, snapshot row: the `after` image as the key's state;
+    //  - delete: the key with _rf_is_deleted = 1, other columns default;
+    //  - update that changes the key: a delete of the old key plus an upsert
+    //    of the new one, both with the event's version.
+    void add(const core::ChangeEvent& event);
 
     std::size_t rows() const { return rows_; }
 
@@ -35,6 +38,9 @@ public:
     ::clickhouse::Block take();
 
 private:
+    void add_upsert(const core::ChangeEvent& event);
+    // `key` holds the values of `key_columns`, in the same order.
+    void add_delete(const core::ChangeEvent& event, const std::vector<std::string>& key);
     void add_meta(const core::ChangeEvent& event, core::Op op, bool deleted);
     void reset_meta();
     // Position of `name` in `row`, trying `hint` first (rows usually follow
