@@ -46,8 +46,10 @@ void TxBuffer::abort() {
 }
 
 BufferStats TxBuffer::stats() const {
-    return BufferStats{committed_.size() + open_.size(), committed_bytes_ + open_bytes_, committed_.size(),
-                       oldest_};
+    BufferStats stats{committed_.size() + open_.size(), committed_bytes_ + open_bytes_, committed_.size(),
+                      oldest_};
+    stats.commit_pending = last_commit_end_.has_value();
+    return stats;
 }
 
 TxBuffer::Drained TxBuffer::drain(bool include_open) {

@@ -93,13 +93,19 @@ void flush_and_confirm(pg::ReplicationConnection& conn, StreamState& state, bool
 }
 
 void maybe_flush(pg::ReplicationConnection& conn, StreamState& state) {
-    switch (state.policy.decide(state.sink.stats(), state.sink.in_transaction(), std::chrono::steady_clock::now())) {
+    const sink::BufferStats stats = state.sink.stats();
+    switch (state.policy.decide(stats, state.sink.in_transaction(), std::chrono::steady_clock::now())) {
         case sink::FlushDecision::None:
             break;
         case sink::FlushDecision::Complete:
             flush_and_confirm(conn, state, false);
             break;
         case sink::FlushDecision::Oversized:
+            // Decision 4.5 rule 2: the open transaction is written so far to
+            // bound memory, but the slot moves only past complete ones; a
+            // replay after a crash rewrites it with the same versions.
+            log::info("Open transaction passed the hard batch limit ({} rows, {} MB buffered); writing it before "
+                      "its Commit.", stats.rows, stats.bytes >> 20);
             flush_and_confirm(conn, state, true);
             break;
     }
