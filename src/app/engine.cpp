@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -178,13 +179,19 @@ int Engine::run() {
     pg::check_publication(query, publication, table);
     pg::check_watermark_privilege(query);
 
+    // The target is checked before the stream opens (decision 7.3).
+    std::unique_ptr<sink::Sink> sink;
     if (config_.output.sink.value == config::SinkKind::ClickHouse) {
-        sink::clickhouse::ClickHouseSink clickhouse(config_.clickhouse, config_.retry);
-        const sink::PrepareResult prepared = clickhouse.prepare(table);
-        check_prepared(prepared, table, clickhouse.target(), slot);
-        log::info("ClickHouse target {} (uuid {}){}.", clickhouse.target(), prepared.table_identity,
+        auto clickhouse = std::make_unique<sink::clickhouse::ClickHouseSink>(config_.clickhouse, config_.retry);
+        const sink::PrepareResult prepared = clickhouse->prepare(table);
+        check_prepared(prepared, table, clickhouse->target(), slot);
+        log::info("ClickHouse target {} (uuid {}){}.", clickhouse->target(), prepared.table_identity,
                   prepared.created ? ", created" : "");
-        log::warn("Writes to ClickHouse are not available yet; writing JSON Lines to stdout.");
+        sink = std::move(clickhouse);
+    } else {
+        sink = std::make_unique<sink::jsonl::JsonlSink>();
+        sink->prepare(table);
+        log::info("Writing JSON Lines to stdout.");
     }
 
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
@@ -193,9 +200,7 @@ int Engine::run() {
     log::info("Connected to system {} (timeline {}, WAL at {}); streaming from slot '{}' via publication '{}'.",
               identity.system_id, identity.timeline, core::format_lsn(identity.xlogpos), slot, publication);
 
-    sink::jsonl::JsonlSink sink;
-    sink.prepare(table);
-    StreamState state{core::TransactionAssembler{}, sink,
+    StreamState state{core::TransactionAssembler{}, *sink,
                       sink::FlushPolicy(sink::FlushLimits::from(config_.batch))};
 
     conn.start(slot, publication, /*start_lsn=*/0);
