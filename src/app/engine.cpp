@@ -24,6 +24,8 @@
 #include "sink/flush_policy.hpp"
 #include "sink/jsonl/jsonl_sink.hpp"
 #include "sink/sink.hpp"
+#include "state/directory_lock.hpp"
+#include "state/state_store.hpp"
 
 namespace recordflow::app {
 
@@ -164,6 +166,11 @@ int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table, 
 Engine::Engine(config::Config config) : config_(std::move(config)) {}
 
 int Engine::run() {
+    // One instance per data directory, before anything else (decision 4.2).
+    const state::StateStore store(config_.state.data_dir.value);
+    store.prepare_directory();
+    const state::DirectoryLock lock(store.directory());
+
     const std::string& slot = config_.source.slot.value;
     const std::string& publication = config_.source.publication.value;
 
