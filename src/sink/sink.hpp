@@ -14,6 +14,7 @@
 namespace recordflow::sink {
 
 struct PrepareResult {
+    std::string target;          // e.g. "recordflow.public__orders", for the state file and messages
     std::string table_identity;  // e.g. the ClickHouse table UUID; empty if the sink has none
     bool created = false;        // the target did not exist and was created
     core::SchemaDiff diff;       // differences between source and existing target
