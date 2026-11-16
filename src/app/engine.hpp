@@ -10,6 +10,7 @@
 #include "core/table_schema.hpp"
 #include "core/transaction_assembler.hpp"
 #include "core/version.hpp"
+#include "runtime/errors.hpp"
 #include "pgoutput/decoder.hpp"
 #include "pgoutput/messages.hpp"
 #include "sink/flush_policy.hpp"
@@ -52,14 +53,21 @@ private:
     // privilege, sink.prepare, the slot's position, the startup decision and
     // START_REPLICATION from last_flushed_lsn.
     void startup();
+    // Connects (with backoff), checks the system_id against the state file and
+    // starts replication from last_flushed_lsn (decision 8.2).
+    void start_replication();
+    // A lost replication connection (decision 8.2): drop the open transaction,
+    // reset the decoder, write the complete transactions, reconnect.
+    void recover(const TransientError& error);
 
     // Runs `step` until it does not throw a TransientError, with backoff
     // (decision 8.3); `on_failure` runs after each failed attempt.
     void retry_transient(std::string_view what, const std::function<void()>& step,
                          const std::function<void()>& on_failure = {});
 
-    // The main loop (decisions 8.5 and 9.5).
-    int stream();
+    // The main loop (decisions 8.5 and 9.5); returns only through exceptions
+    // until shutdown handling exists.
+    [[noreturn]] void stream();
     void handle_frame(const pg::CopyData& copy);
     void dispatch(const pgoutput::Message& message);
     void check_relation(const pgoutput::TableInfo& relation);
