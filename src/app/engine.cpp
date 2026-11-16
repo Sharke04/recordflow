@@ -1,5 +1,6 @@
 #include "app/engine.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -12,6 +13,7 @@
 #include <variant>
 
 #include "app/startup_decision.hpp"
+#include "core/schema_guard.hpp"
 #include "core/transaction_assembler.hpp"
 #include "pg/catalog.hpp"
 #include "pg/conninfo.hpp"
@@ -36,38 +38,6 @@ struct Overloaded : Handlers... {
     using Handlers::operator()...;
 };
 
-struct StreamState {
-    core::TransactionAssembler assembler;
-    sink::Sink& sink;
-    sink::FlushPolicy policy;
-};
-
-void handle_message(const pgoutput::Message& message, StreamState& state) {
-    std::visit(Overloaded{
-                   [&](const pgoutput::Begin& begin) {
-                       state.assembler.begin(begin);
-                       state.sink.begin();
-                   },
-                   [&](const pgoutput::Commit& commit) {
-                       state.assembler.commit(commit);
-                       state.sink.commit(commit.end_lsn);
-                   },
-                   [&](const pgoutput::Relation& relation) {
-                       log::debug("Relation {}.{} (oid {}, {} columns)", relation.table->schema,
-                                  relation.table->name, relation.table->oid, relation.table->columns.size());
-                   },
-                   [&](const pgoutput::Change& change) { state.sink.append(state.assembler.change(change)); },
-                   [&](const pgoutput::Truncate& truncate) {
-                       for (const auto& event : state.assembler.truncate(truncate)) state.sink.append(event);
-                   },
-                   [&](const pgoutput::LogicalMessage& message) {
-                       log::debug("Logical message '{}' at {}", message.prefix, core::format_lsn(message.lsn));
-                   },
-                   [&](const pgoutput::Other& other) { log::debug("Ignoring message type '{}'", other.type); },
-               },
-               message);
-}
-
 // A difference between the source and an existing target found at startup
 // stops before anything is written (decisions 7.3 and 7.4).
 void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema& table, const std::string& slot) {
@@ -84,42 +54,6 @@ void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema
                     table.qualified(), prepared.target, prepared.diff.text(), prepared.target, prepared.target,
                     slot),
         prepared.diff.text());
-}
-
-// Writes the buffer and confirms what is stored: the slot moves only after a
-// flush (decision 4.5), never on a Commit alone.
-void flush_and_confirm(pg::ReplicationConnection& conn, StreamState& state, bool include_open) {
-    const std::optional<core::Lsn> stored = state.sink.flush(include_open);
-    if (stored) conn.confirm(*stored);
-}
-
-void maybe_flush(pg::ReplicationConnection& conn, StreamState& state) {
-    const sink::BufferStats stats = state.sink.stats();
-    switch (state.policy.decide(stats, state.sink.in_transaction(), std::chrono::steady_clock::now())) {
-        case sink::FlushDecision::None:
-            break;
-        case sink::FlushDecision::Complete:
-            flush_and_confirm(conn, state, false);
-            break;
-        case sink::FlushDecision::Oversized:
-            // Decision 4.5 rule 2: the open transaction is written so far to
-            // bound memory, but the slot moves only past complete ones; a
-            // replay after a crash rewrites it with the same versions.
-            log::info("Open transaction passed the hard batch limit ({} rows, {} MB buffered); writing it before "
-                      "its Commit.", stats.rows, stats.bytes >> 20);
-            flush_and_confirm(conn, state, true);
-            break;
-    }
-}
-
-void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& frame, StreamState& state) {
-    const auto wal_end = static_cast<core::Lsn>(frame.getLong());
-    frame.getLong();
-    const bool reply_requested = frame.get() != 0;
-    // With nothing buffered, everything up to the server's WAL end is stored
-    // (decision 4.5 rule 6).
-    if (!state.sink.in_transaction() && state.sink.stats().rows == 0) conn.confirm(wal_end);
-    conn.maybe_send_status(std::chrono::steady_clock::now(), reply_requested);
 }
 
 std::string describe_columns(const core::TableSchema& table) {
@@ -146,7 +80,9 @@ const char* action_name(StartupAction action) {
 }  // namespace
 
 Engine::Engine(config::Config config)
-    : config_(std::move(config)), store_(config_.state.data_dir.value) {}
+    : config_(std::move(config)),
+      store_(config_.state.data_dir.value),
+      policy_(sink::FlushLimits::from(config_.batch)) {}
 
 Engine::~Engine() = default;
 
@@ -239,6 +175,9 @@ void Engine::startup() {
     for (const auto& message : decision.messages) log::warn("{}", message);
     state_ = std::move(*decision.state);
     store_.save(state_);
+    stored_lsn_ = state_.last_flushed_lsn;
+    last_checkpoint_ = std::chrono::steady_clock::now();
+    assembler_.set_primary_key(table_.qualified(), table_.primary_key);
     log::info("State {}: {}; last flushed {}, slot confirmed {}, snapshot {}.", store_.file().string(),
               action_name(decision.action), core::format_lsn(state_.last_flushed_lsn),
               core::format_lsn(slot_info.confirmed_flush_lsn), state::to_string(state_.snapshot.status));
@@ -261,42 +200,148 @@ void Engine::startup() {
               core::format_lsn(state_.last_flushed_lsn));
 }
 
-int Engine::stream() {
-    StreamState state{core::TransactionAssembler{}, *sink_, sink::FlushPolicy(sink::FlushLimits::from(config_.batch))};
-    pg::ReplicationConnection& conn = *repl_;
-    pgoutput::PgoutputDecoder decoder;
-    state.assembler.set_primary_key(table_.qualified(), table_.primary_key);
+bool Engine::tracked(const core::ChangeEvent& event) const {
+    return event.schema_name == table_.schema && event.table == table_.name;
+}
 
-    constexpr std::chrono::milliseconds kPollInterval{200};
-    while (!conn.ended()) {
-        const auto copy = conn.poll(kPollInterval);
-        if (copy) {
-            pgoutput::ByteReader frame(copy->data(), copy->size());
-            switch (frame.get()) {
-                case 'w': {
-                    frame.getLong();  // start of WAL data
-                    frame.getLong();  // current end of WAL
-                    frame.getLong();  // send time
-                    std::optional<pgoutput::Message> message;
-                    try {
-                        message = decoder.decode(frame.rest(), frame.remaining());
-                    } catch (const std::exception& e) {
-                        log::warn("skipping malformed frame: {}", e.what());
-                    }
-                    if (message) handle_message(*message, state);
-                    break;
-                }
-                case 'k':
-                    handle_keepalive(conn, frame, state);
-                    break;
-            }
-        }
-        maybe_flush(conn, state);
-        conn.maybe_send_status(std::chrono::steady_clock::now());
+void Engine::check_relation(const pgoutput::TableInfo& relation) {
+    if (!core::same_table(table_, relation)) {
+        log::debug("Relation {}.{} (oid {}) is not the tracked table; ignored.", relation.schema, relation.name,
+                   relation.oid);
+        return;
     }
-    if (state.sink.in_transaction()) state.sink.abort();
-    flush_and_confirm(conn, state, false);
-    conn.maybe_send_status(std::chrono::steady_clock::now(), true);
+    // Types the known schema does not describe are looked up in the catalog.
+    const core::SchemaDiff diff = core::compare_relation(table_, relation, [&](core::ColumnSchema& column) {
+        const pg::QueryResult type = query_->exec(
+            "SELECT format_type($1::oid, $2::int), typtype = 'e' FROM pg_type WHERE oid = $1::oid",
+            {std::to_string(column.type_oid), std::to_string(column.type_mod)});
+        if (type.empty()) return;
+        column.type_name = type.rows[0][0].value_or("");
+        column.is_enum = type.rows[0][1].value_or("") == "t";
+    });
+    if (diff.empty()) {
+        log::debug("Relation {}.{} matches the target.", relation.schema, relation.name);
+        return;
+    }
+    throw SchemaChangeError(std::format("schema change detected on {} (Relation message)\n  differences:\n{}",
+                                        table_.qualified(), diff.text()),
+                            diff.text());
+}
+
+void Engine::dispatch(const pgoutput::Message& message) {
+    std::visit(Overloaded{
+                   [&](const pgoutput::Begin& begin) {
+                       assembler_.begin(begin);
+                       sink_->begin();
+                   },
+                   [&](const pgoutput::Commit& commit) {
+                       assembler_.commit(commit);
+                       sink_->commit(commit.end_lsn);
+                   },
+                   // Before any change of the same transaction (decision 7.2).
+                   [&](const pgoutput::Relation& relation) { check_relation(*relation.table); },
+                   [&](const pgoutput::Change& change) {
+                       // Other tables of the publication are skipped (decision 4.4).
+                       core::ChangeEvent event = assembler_.change(change);
+                       if (tracked(event)) sink_->append(event);
+                   },
+                   [&](const pgoutput::Truncate& truncate) {
+                       for (const auto& event : assembler_.truncate(truncate)) {
+                           if (tracked(event)) sink_->append(event);
+                       }
+                   },
+                   [&](const pgoutput::LogicalMessage& logical) {
+                       log::debug("Logical message '{}' at {}", logical.prefix, core::format_lsn(logical.lsn));
+                   },
+                   [&](const pgoutput::Other& other) { log::debug("Ignoring message type '{}'", other.type); },
+               },
+               message);
+}
+
+void Engine::handle_frame(const pg::CopyData& copy) {
+    pgoutput::ByteReader frame(copy.data(), copy.size());
+    switch (frame.get()) {
+        case 'w': {
+            frame.getLong();  // start of WAL data
+            frame.getLong();  // current end of WAL
+            frame.getLong();  // send time
+            // A malformed message is an unexpected error: skipping it would lose data.
+            dispatch(decoder_.decode(frame.rest(), frame.remaining()));
+            break;
+        }
+        case 'k': {
+            const auto wal_end = static_cast<core::Lsn>(frame.getLong());
+            frame.getLong();  // send time
+            const bool reply_requested = frame.get() != 0;
+            // Keepalives move the position only with an empty buffer (decision 4.1).
+            const sink::BufferStats stats = sink_->stats();
+            if (!sink_->in_transaction() && stats.rows == 0 && !stats.commit_pending) advance(wal_end, false);
+            if (reply_requested) repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
+            break;
+        }
+    }
+}
+
+void Engine::advance(core::Lsn lsn, bool now) {
+    stored_lsn_ = std::max(stored_lsn_, lsn);
+    checkpoint_if_due(now);
+}
+
+void Engine::checkpoint_if_due(bool force) {
+    if (stored_lsn_ <= state_.last_flushed_lsn) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - last_checkpoint_ < kPositionCheckpointInterval) return;
+    // The state file first, then the slot (decision 4.2): a crash in between
+    // only replays what is already stored.
+    state_.last_flushed_lsn = stored_lsn_;
+    store_.save(state_);
+    last_checkpoint_ = now;
+    repl_->confirm(stored_lsn_);
+    repl_->maybe_send_status(now);
+}
+
+void Engine::flush_and_checkpoint(bool include_open) {
+    const std::optional<core::Lsn> stored = sink_->flush(include_open);
+    if (stored) advance(*stored, true);
+}
+
+void Engine::maybe_flush() {
+    const sink::BufferStats stats = sink_->stats();
+    switch (policy_.decide(stats, sink_->in_transaction(), std::chrono::steady_clock::now())) {
+        case sink::FlushDecision::None:
+            break;
+        case sink::FlushDecision::Complete:
+            if (stats.rows == 0) {
+                // Only a position (transactions without rows for the table):
+                // the state file may wait for the interval.
+                if (const auto stored = sink_->flush(false)) advance(*stored, false);
+            } else {
+                flush_and_checkpoint(false);
+            }
+            break;
+        case sink::FlushDecision::Oversized:
+            // Decision 4.5 rule 2: the open transaction is written so far to
+            // bound memory, but the slot moves only past complete ones; a
+            // replay after a crash rewrites it with the same versions.
+            log::info("Open transaction passed the hard batch limit ({} rows, {} MB buffered); writing it before "
+                      "its Commit.", stats.rows, stats.bytes >> 20);
+            flush_and_checkpoint(true);
+            break;
+    }
+}
+
+int Engine::stream() {
+    constexpr std::chrono::milliseconds kPollInterval{200};
+    while (!repl_->ended()) {
+        if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
+        maybe_flush();
+        checkpoint_if_due();
+        repl_->maybe_send_status(std::chrono::steady_clock::now());
+    }
+    if (sink_->in_transaction()) sink_->abort();
+    flush_and_checkpoint(false);
+    checkpoint_if_due(true);
+    repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
     log::info("Stream ended.");
     return 0;
 }

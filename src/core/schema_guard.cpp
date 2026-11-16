@@ -22,6 +22,12 @@ const TargetColumn* find(const std::vector<TargetColumn>& columns, const std::st
     return nullptr;
 }
 
+bool same_names(std::vector<std::string> a, std::vector<std::string> b) {
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    return a == b;
+}
+
 std::string described(const TargetColumn& column) {
     return column.source_type.empty() ? column.type : std::format("{} -> {}", column.source_type, column.type);
 }
@@ -74,6 +80,53 @@ SchemaDiff compare(const TargetSchema& existing, const TargetSchema& derived) {
     if (existing.sorting_key != derived.sorting_key) {
         diff.lines.push_back(std::format("~ primary key: ({}) now ({})", join(existing.sorting_key),
                                          join(derived.sorting_key)));
+    }
+    return diff;
+}
+
+bool same_table(const TableSchema& known, const pgoutput::TableInfo& relation) {
+    return relation.oid == known.oid || (relation.schema == known.schema && relation.name == known.name);
+}
+
+SchemaDiff compare_relation(const TableSchema& known, const pgoutput::TableInfo& relation,
+                            const TypeLookup& lookup) {
+    SchemaDiff diff;
+    if (relation.schema != known.schema || relation.name != known.name) {
+        diff.lines.push_back(std::format("~ table: {} now {}.{}", known.qualified(), relation.schema, relation.name));
+    }
+    if (relation.oid != known.oid) {
+        diff.lines.push_back(std::format("~ table recreated: oid {} now {}", known.oid, relation.oid));
+    }
+
+    TableSchema current = known;
+    current.columns.clear();
+    std::vector<std::string> key_columns;
+    for (const auto& column : relation.columns) {
+        ColumnSchema described{column.name, column.type_oid, column.type_mod, "", false, false};
+        const auto old = std::find_if(known.columns.begin(), known.columns.end(),
+                                      [&](const ColumnSchema& c) { return c.name == column.name; });
+        if (old != known.columns.end()) described.not_null = old->not_null;
+        if (old != known.columns.end() && old->type_oid == column.type_oid && old->type_mod == column.type_mod) {
+            described.type_name = old->type_name;
+            described.is_enum = old->is_enum;
+        } else if (lookup) {
+            lookup(described);
+        }
+        if (column.part_of_key) key_columns.push_back(column.name);
+        current.columns.push_back(std::move(described));
+    }
+    // A primary-key column that is gone leaves the key to the column diff.
+    const SchemaDiff columns = compare(derive_target(known), derive_target(current));
+    diff.lines.insert(diff.lines.end(), columns.lines.begin(), columns.lines.end());
+
+    if (relation.replica_identity != known.replica_identity) {
+        diff.lines.push_back(std::format("~ replica identity: {} now {}", known.replica_identity,
+                                         relation.replica_identity));
+    } else if (known.replica_identity == 'd' && !same_names(key_columns, known.primary_key)) {
+        // Under REPLICA IDENTITY DEFAULT the key flags are the primary key
+        // (flags in column order, the key in index order).
+        diff.lines.push_back(std::format("~ primary key: ({}) now ({})", join(known.primary_key),
+                                         join(key_columns)));
     }
     return diff;
 }
