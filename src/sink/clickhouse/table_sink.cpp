@@ -84,7 +84,7 @@ void TableSink::add_upsert(const core::ChangeEvent& event) {
         if (value == nullptr) {
             throw SchemaChangeError(std::format("column \"{}\" of {} is missing from the change at {}",
                                                 columns_[i].name(), table_, event.version.str()),
-                                    std::format("    - dropped column \"{}\"", columns_[i].name()));
+                                    std::format("- dropped column \"{}\"", columns_[i].name()));
         }
         values.push_back(value);
     }
@@ -158,6 +158,13 @@ ch::Block TableSink::take() {
     rows_ = 0;
     unchanged_toast_ = 0;
     return block;
+}
+
+void TableSink::discard() {
+    for (auto& column : columns_) column.take();
+    reset_meta();
+    rows_ = 0;
+    unchanged_toast_ = 0;
 }
 
 }  // namespace recordflow::sink::clickhouse

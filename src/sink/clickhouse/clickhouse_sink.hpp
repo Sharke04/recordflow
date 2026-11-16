@@ -57,6 +57,8 @@ private:
     // Retries `write` with backoff while it fails with a TransientError.
     void with_retry(const std::function<void()>& write);
     void write_rows();  // the rows added so far, as one INSERT
+    [[noreturn]] void write_before_failure(const TxBuffer::Drained& drained, std::size_t written,
+                                           std::size_t failed, const SchemaChangeError& error);
     bool database_exists();
     InterventionError missing_database() const;
     std::optional<ExistingTable> read_table();

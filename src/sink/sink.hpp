@@ -7,6 +7,7 @@
 #include "core/schema_guard.hpp"
 #include "core/table_schema.hpp"
 #include "core/version.hpp"
+#include "runtime/errors.hpp"
 #include "sink/tx_buffer.hpp"
 
 // The target of the event stream (decision 9.4): ClickHouse in production,
@@ -18,6 +19,22 @@ struct PrepareResult {
     std::string table_identity;  // e.g. the ClickHouse table UUID; empty if the sink has none
     bool created = false;        // the target did not exist and was created
     core::SchemaDiff diff;       // differences between source and existing target
+};
+
+// An event that cannot be written because the source schema changed
+// (decision 7.1, found by the value converter). flush() first writes the
+// complete transactions before the one holding the event; `stored` is the
+// commit_end of the last of them. The rest of the drained events is dropped.
+class FlushSchemaChangeError : public SchemaChangeError {
+public:
+    FlushSchemaChangeError(const SchemaChangeError& cause, std::optional<core::Lsn> stored, core::Version at)
+        : SchemaChangeError(cause.what(), cause.diff()), stored_(stored), at_(at) {}
+    const std::optional<core::Lsn>& stored() const { return stored_; }
+    core::Version at() const { return at_; }
+
+private:
+    std::optional<core::Lsn> stored_;
+    core::Version at_;
 };
 
 class Sink {
@@ -38,7 +55,8 @@ public:
 
     // Writes the complete transactions (and the open one's events so far if
     // `include_open`). Returns the commit_end of the last complete transaction
-    // written, if any. Truncate events are applied at their position.
+    // written, if any. Truncate events are applied at their position. Throws
+    // FlushSchemaChangeError for an event the target cannot take.
     virtual std::optional<core::Lsn> flush(bool include_open = false) = 0;
 
     // Marks every row whose latest version is below `below` as deleted with

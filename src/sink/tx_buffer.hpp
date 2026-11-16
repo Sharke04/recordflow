@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "core/change_event.hpp"
@@ -36,6 +37,9 @@ public:
         std::vector<core::ChangeEvent> events;
         // commit_end of the last complete transaction among `events`, if any
         std::optional<core::Lsn> last_commit_end;
+        // Per complete transaction: the number of `events` up to its end and
+        // its commit_end, in stream order.
+        std::vector<std::pair<std::size_t, core::Lsn>> commits;
     };
 
     // Removes the complete transactions, plus the open one's events so far if
@@ -48,6 +52,7 @@ private:
     std::vector<core::ChangeEvent> committed_;
     std::vector<core::ChangeEvent> open_;
     std::optional<core::Lsn> last_commit_end_;
+    std::vector<std::pair<std::size_t, core::Lsn>> commits_;
     std::size_t committed_bytes_ = 0;
     std::size_t open_bytes_ = 0;
     bool in_transaction_ = false;

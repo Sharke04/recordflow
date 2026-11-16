@@ -35,6 +35,7 @@ void TxBuffer::commit(core::Lsn commit_end) {
     open_.clear();
     open_bytes_ = 0;
     last_commit_end_ = commit_end;
+    commits_.emplace_back(committed_.size(), commit_end);
     in_transaction_ = false;
 }
 
@@ -56,6 +57,7 @@ TxBuffer::Drained TxBuffer::drain(bool include_open) {
     Drained drained;
     drained.events = std::move(committed_);
     drained.last_commit_end = std::exchange(last_commit_end_, std::nullopt);
+    drained.commits = std::exchange(commits_, {});
     committed_.clear();
     committed_bytes_ = 0;
     if (include_open) {
