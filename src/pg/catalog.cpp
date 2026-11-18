@@ -156,4 +156,16 @@ SlotInfo read_slot(QueryConnection& query, const std::string& slot) {
     return info;
 }
 
+std::string describe_slot_holder(QueryConnection& query, const std::string& slot) {
+    const QueryResult result = query.exec(
+        "SELECT s.active_pid, r.application_name, r.client_addr, r.backend_start "
+        "FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid "
+        "WHERE s.slot_name = $1",
+        {slot});
+    if (result.empty() || text(result, 0, 0).empty()) return "no process holds it now";
+    return std::format("pid {}, application_name '{}', client_addr {}, connected since {}", text(result, 0, 0),
+                       text(result, 0, 1), text(result, 0, 2).empty() ? "local" : text(result, 0, 2),
+                       text(result, 0, 3).empty() ? "?" : text(result, 0, 3));
+}
+
 }  // namespace recordflow::pg

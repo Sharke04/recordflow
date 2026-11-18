@@ -34,4 +34,8 @@ struct SlotInfo {
 // Recordflow never creates slots.
 SlotInfo read_slot(QueryConnection& query, const std::string& slot);
 
+// Who holds an active slot, from pg_stat_replication: "pid 4711,
+// application_name 'recordflow', client_addr 10.0.0.5, connected since ...".
+std::string describe_slot_holder(QueryConnection& query, const std::string& slot);
+
 }  // namespace recordflow::pg
