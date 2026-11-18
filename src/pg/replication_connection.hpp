@@ -80,6 +80,11 @@ public:
     // asked for a reply). Failures are logged.
     void maybe_send_status(std::chrono::steady_clock::time_point now, bool force = false);
 
+    // Ends the COPY stream (CopyDone) after the last status update and waits
+    // up to `timeout` for the server to finish it (decision 8.4, step 6).
+    // Failures are logged; the connection is closed by the destructor.
+    void finish(std::chrono::milliseconds timeout);
+
     static constexpr std::chrono::seconds kStatusInterval{10};
 
 private:
