@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "pg/conninfo.hpp"
+#include "pg/snapshot_queries.hpp"
 
 struct pg_conn;
 
@@ -28,11 +29,11 @@ struct QueryResult {
 // The regular (non-replication) connection used for catalog queries,
 // watermarks and snapshot chunks. It connects on first use and reconnects on
 // the next use after the connection was lost.
-class QueryConnection {
+class QueryConnection : public SnapshotQueries {
 public:
     // `params` from build_connection_params(..., ConnectionKind::Query).
     explicit QueryConnection(KeyValues params);
-    ~QueryConnection();
+    ~QueryConnection() override;
     QueryConnection(const QueryConnection&) = delete;
     QueryConnection& operator=(const QueryConnection&) = delete;
 
@@ -42,6 +43,10 @@ public:
 
     // Quotes an identifier for use in SQL text ("public" -> "\"public\"").
     std::string escape_identifier(const std::string& name);
+
+    // SELECT pg_logical_emit_message(true, 'recordflow', 'L:<slot>:<uuid>')
+    // in autocommit (decision 5.2).
+    void emit_watermark(const Watermark& mark) override;
 
     // Drops the connection; the next call reconnects.
     void reset();

@@ -358,7 +358,14 @@ void Engine::dispatch(const pgoutput::Message& message) {
                            if (tracked(event)) sink_->append(event);
                        }
                    },
+                   // Logical messages never reach the sink; Recordflow's own
+                   // are snapshot watermarks (decision 5.2).
                    [&](const pgoutput::LogicalMessage& logical) {
+                       if (logical.prefix == pg::kWatermarkPrefix) {
+                           log::debug("Watermark '{}' at {} (commit {})", logical.content,
+                                      core::format_lsn(logical.lsn), core::format_lsn(transaction_lsn_));
+                           return;
+                       }
                        log::debug("Logical message '{}' at {}", logical.prefix, core::format_lsn(logical.lsn));
                    },
                    [&](const pgoutput::Other& other) { log::debug("Ignoring message type '{}'", other.type); },
