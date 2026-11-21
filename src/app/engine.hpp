@@ -13,7 +13,9 @@
 #include "runtime/errors.hpp"
 #include "pgoutput/decoder.hpp"
 #include "pgoutput/messages.hpp"
+#include "runtime/backoff.hpp"
 #include "sink/flush_policy.hpp"
+#include "snapshot/snapshot_runner.hpp"
 #include "state/directory_lock.hpp"
 #include "state/state.hpp"
 #include "state/state_store.hpp"
@@ -76,11 +78,26 @@ private:
 
     // Decisions 7.3 and 7.4: drops the open transaction, stores and confirms
     // the complete ones and throws SchemaChangeError with the report.
-    [[noreturn]] void stop_on_schema_change(std::string_view where, core::Lsn detected, const std::string& diff);
+    [[noreturn]] void stop_on_schema_change(std::string_view where, std::optional<core::Lsn> detected,
+                                            const std::string& diff);
     std::string schema_change_report(const std::string& target, std::string_view where,
                                      std::optional<core::Lsn> stored, std::optional<core::Lsn> detected,
                                      const std::string& diff) const;
     bool tracked(const core::ChangeEvent& event) const;
+    // tracked(), and passes the event to an open snapshot window.
+    bool tracked_change(const core::ChangeEvent& event);
+
+    // Starts or resumes the snapshot pass that the startup decision left
+    // pending or running (decision 5.1).
+    void start_snapshot();
+    // One snapshot step of the main loop: window timeout, the next chunk,
+    // the end of the pass (decisions 5.2 and 5.5).
+    void snapshot_step();
+    void open_chunk(std::chrono::steady_clock::time_point now);
+    void finish_snapshot();
+    // Commit of a stream transaction: the H transaction releases the chunk
+    // rows as a pseudo-transaction.
+    void on_commit(const pgoutput::Commit& commit);
 
     // Flushes when the batch policy says so (decision 4.5).
     void maybe_flush();
@@ -104,6 +121,17 @@ private:
     pgoutput::PgoutputDecoder decoder_;
     core::TransactionAssembler assembler_;
     sink::FlushPolicy policy_;
+
+    std::optional<snapshot::SnapshotRunner> snapshot_;
+    // Progress of the last accepted chunk; it enters the state file with the
+    // checkpoint that covers its rows (decision 5.2, step 6).
+    struct PendingProgress {
+        state::SnapshotProgress progress;
+        core::Lsn commit_end = 0;
+    };
+    std::optional<PendingProgress> pending_progress_;
+    runtime::Backoff chunk_backoff_;  // a failing query connection between chunks (decision 8.2)
+    std::chrono::steady_clock::time_point next_chunk_after_{};
 
     core::Lsn transaction_lsn_ = 0;  // commit LSN of the current (or last) transaction
     core::Lsn stored_lsn_ = 0;  // highest position known to be stored, maybe not yet in the state file
