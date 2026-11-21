@@ -62,8 +62,30 @@ std::string SnapshotRunner::new_window_id() {
                        low >> 48, low & 0xFFFFFFFFFFFFull);
 }
 
-void SnapshotRunner::open_window(pg::SnapshotQueries& queries, const std::deque<core::Xid>& /*recent_xids*/,
-                                 std::optional<core::Xid> /*open_xid*/, Clock::time_point now) {
+void SnapshotRunner::retry(const std::string& reason) {
+    phase_ = Phase::Idle;
+    window_id_.clear();
+    high_lsn_.reset();
+    chunk_.clear();
+    ++retries_;
+    log::warn("Snapshot chunk after {} dropped ({}); retrying ({} of {}).",
+              progress_.last_pk.empty() ? "the beginning" : describe_key(progress_.last_pk), reason, retries_,
+              kMaxRetries);
+    if (retries_ >= kMaxRetries) {
+        throw std::runtime_error(std::format(
+            "the snapshot of {} could not read a chunk after {} attempts in a row (last: {})", table_.qualified(),
+            retries_, reason));
+    }
+}
+
+void SnapshotRunner::on_tick(Clock::time_point now) {
+    if (phase_ == Phase::Idle || now - opened_at_ < settings_.window_timeout) return;
+    retry(std::format("{} watermark did not arrive within {} s", phase_ == Phase::AwaitLow ? "low" : "high",
+                      settings_.window_timeout.count()));
+}
+
+void SnapshotRunner::open_window(pg::SnapshotQueries& queries, const std::deque<core::Xid>& recent_xids,
+                                 std::optional<core::Xid> open_xid, Clock::time_point now) {
     if (!ready_for_chunk(now)) throw std::logic_error("open_window without a pending chunk");
 
     window_id_ = new_window_id();
@@ -81,8 +103,24 @@ void SnapshotRunner::open_window(pg::SnapshotQueries& queries, const std::deque<
         request.read_max = first_chunk_;
         request.limit = settings_.chunk_size;
         pg::ChunkResult result = queries.select_chunk(table_, request);
+        const std::optional<PgSnapshot> snapshot = parse_snapshot(result.snapshot);
+        if (!snapshot) throw std::runtime_error("unexpected pg_current_snapshot() value: " + result.snapshot);
+        snapshot_ = *snapshot;
+        horizon_ = snapshot_.xmin32();
         if (first_chunk_) read_max_ = result.max_pk;
         chunk_.load(table_.primary_key, std::move(result.rows));
+
+        // Decision 5.4, rule 1: every transaction decoded before the pause
+        // (and the one being decoded) must be visible to the SELECT.
+        std::optional<core::Xid> unseen;
+        if (open_xid && !is_visible(snapshot_, *open_xid)) unseen = open_xid;
+        for (auto it = recent_xids.rbegin(); !unseen && it != recent_xids.rend(); ++it) {
+            if (!is_visible(snapshot_, *it)) unseen = *it;
+        }
+        if (unseen) {
+            retry(std::format("transaction {} was committed but not yet visible to the chunk SELECT", *unseen));
+            return;
+        }
 
         queries.emit_watermark({pg::WatermarkKind::High, settings_.slot, window_id_});
     } catch (...) {
@@ -113,11 +151,21 @@ void SnapshotRunner::on_message(const pgoutput::LogicalMessage& message, core::L
     }
 }
 
+bool SnapshotRunner::check_before_low(const core::ChangeEvent& event) {
+    // Decision 5.4, rule 2: a transaction between the pause and L must be
+    // visible to the SELECT. Inside the window the keys are removed instead.
+    if (phase_ != Phase::AwaitLow || is_visible(snapshot_, event.xid)) return true;
+    retry(std::format("transaction {} before the low watermark was not visible to the chunk SELECT", event.xid));
+    return false;
+}
+
 void SnapshotRunner::on_change(const core::ChangeEvent& event) {
+    if (!check_before_low(event)) return;
     if (phase_ == Phase::InWindow && !high_lsn_) chunk_.on_change(event);
 }
 
-void SnapshotRunner::on_truncate(const core::ChangeEvent& /*event*/) {
+void SnapshotRunner::on_truncate(const core::ChangeEvent& event) {
+    if (!check_before_low(event)) return;
     if (phase_ == Phase::InWindow && !high_lsn_) chunk_.on_truncate();
 }
 
@@ -162,6 +210,7 @@ std::optional<AcceptedChunk> SnapshotRunner::on_commit(const CommitInfo& commit,
                chunk_.raw_size(), complete_ ? ", the last one" : "");
 
     accepted.progress = progress_;
+    retries_ = 0;
     phase_ = Phase::Idle;
     window_id_.clear();
     high_lsn_.reset();

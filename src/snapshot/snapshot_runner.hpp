@@ -16,6 +16,7 @@
 #include "pg/snapshot_queries.hpp"
 #include "pgoutput/messages.hpp"
 #include "snapshot/chunk_window.hpp"
+#include "snapshot/visibility.hpp"
 #include "state/state.hpp"
 
 // One snapshot pass of the tracked table through DBLog windows (decision 5,
@@ -75,8 +76,11 @@ public:
     bool ready_for_chunk(Clock::time_point now) const;
 
     // Steps 2-4 of decision 5.2 while the stream is not read: low watermark,
-    // the chunk SELECT, high watermark. Errors of the queries propagate after
-    // the window is dropped.
+    // the chunk SELECT, high watermark. `recent_xids` are the transactions
+    // committed in the stream so far and `open_xid` the one being decoded;
+    // if the SELECT did not see one of them the chunk is retried
+    // (decision 5.4). Errors of the queries propagate after the window is
+    // dropped.
     void open_window(pg::SnapshotQueries& queries, const std::deque<core::Xid>& recent_xids,
                      std::optional<core::Xid> open_xid, Clock::time_point now);
 
@@ -93,6 +97,17 @@ public:
     // Drops an open window (lost connection, shutdown); the chunk is read
     // again later with new watermarks.
     void abort_window(std::string_view reason);
+    // Drops the window if L or H has not arrived within window_timeout.
+    void on_tick(Clock::time_point now);
+
+    // xmin of the last chunk's snapshot: older xids are visible to every later
+    // snapshot and may be forgotten (decision 5.4).
+    std::optional<core::Xid> xid_horizon() const { return horizon_; }
+    // Chunks retried in a row since the last accepted one.
+    int retries() const { return retries_; }
+
+    // Retries of one chunk in a row before the snapshot gives up (exit code 1).
+    static constexpr int kMaxRetries = 10;
 
     SweepBounds sweep_bounds() const;
     // After the sweep: status Done, no pass.
@@ -102,6 +117,10 @@ private:
     enum class Phase { Idle, AwaitLow, InWindow };
 
     std::string new_window_id();
+    // Drops the window and counts a retry; throws after kMaxRetries.
+    void retry(const std::string& reason);
+    // Rule 2 of decision 5.4 for an event before L; false if the window was dropped.
+    bool check_before_low(const core::ChangeEvent& event);
     core::ChangeEvent read_event(core::Row row, core::Lsn high_lsn, std::int64_t commit_ts) const;
 
     core::TableSchema table_;
@@ -122,6 +141,9 @@ private:
     core::Lsn low_lsn_ = 0;
     std::optional<core::Lsn> high_lsn_;  // H seen in the current transaction
     std::int64_t last_high_ts_ = 0;
+    PgSnapshot snapshot_;  // of the current window's SELECT
+    std::optional<core::Xid> horizon_;
+    int retries_ = 0;
 };
 
 }  // namespace recordflow::snapshot
