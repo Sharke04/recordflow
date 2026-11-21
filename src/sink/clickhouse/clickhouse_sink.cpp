@@ -3,10 +3,12 @@
 #include <clickhouse/columns/numeric.h>
 #include <clickhouse/columns/string.h>
 #include <clickhouse/error_codes.h>
+#include <absl/numeric/int128.h>
 
 #include <algorithm>
 #include <format>
 #include <functional>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 
@@ -212,8 +214,42 @@ void ClickHouseSink::write_before_failure(const TxBuffer::Drained& drained, std:
     throw FlushSchemaChangeError(error, stored, drained.events[failed].version);
 }
 
-void ClickHouseSink::sweep(core::Version, core::Version) {
-    throw std::logic_error("ClickHouseSink::sweep is not implemented yet");
+namespace {
+
+// A version as a UInt128 literal (decision 2.2).
+std::string version_literal(core::Version version) {
+    std::ostringstream out;
+    out << absl::MakeUint128(version.commit_lsn, version.seq);
+    return "toUInt128('" + out.str() + "')";
+}
+
+}  // namespace
+
+void ClickHouseSink::sweep(core::Version below, core::Version tombstone, std::int64_t commit_ts) {
+    if (!rows_) throw std::logic_error("ClickHouseSink::sweep before prepare");
+    std::string keys;
+    for (const auto& column : source_.primary_key) keys += quote_identifier(column) + ", ";
+    // Columns not listed get their defaults; readers only see the deletion.
+    const std::string sql = std::format(
+        "INSERT INTO {0} ({1}{2}, {3}, {4}, {5}, {6})\n"
+        "SELECT {1}{7}, 1, 'd', 'snapshot', fromUnixTimestamp64Micro(toInt64({8}), 'UTC')\n"
+        "FROM {0} FINAL\n"
+        "WHERE {2} < {9} AND {3} = 0",
+        target(), keys, quote_identifier(kVersionColumn), quote_identifier(kIsDeletedColumn),
+        quote_identifier(kOpColumn), quote_identifier(kSourceColumn), quote_identifier(kCommitTsColumn),
+        version_literal(tombstone), commit_ts + core::kPostgresEpochUnixMicros, version_literal(below));
+    log::info("Sweeping {}: rows older than {} are marked deleted at {}.", target(), below.str(), tombstone.str());
+    with_retry([&] { client_.Execute(sql); });
+
+    std::uint64_t swept = 0;
+    with_retry([&] {
+        client_.Select(std::format("SELECT count() FROM {} WHERE {} = {}", target(), quote_identifier(kVersionColumn),
+                                   version_literal(tombstone)),
+                       [&](const ::clickhouse::Block& block) {
+                           if (block.GetRowCount() > 0) swept = block[0]->As<::clickhouse::ColumnUInt64>()->At(0);
+                       });
+    });
+    log::info("Sweep of {} done: {} orphan rows removed.", target(), swept);
 }
 
 }  // namespace recordflow::sink::clickhouse

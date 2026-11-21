@@ -243,9 +243,15 @@ void Engine::snapshot_step() {
 }
 
 void Engine::finish_snapshot() {
-    // The last chunk's rows and progress are stored first (decision 5.5, step 1).
+    // Decision 5.5: 1. the last chunk's rows and progress are stored first, so
+    // that no event between S and H can be overwritten by the sweep;
     flush_and_checkpoint(false);
     confirm_now();
+    // 2. the sweep (nothing for JSONL); a crash here leaves status running,
+    //    and the next start reads an empty chunk and sweeps again;
+    const snapshot::SweepBounds bounds = snapshot_->sweep_bounds();
+    sink_->sweep(bounds.below, bounds.tombstone, bounds.commit_ts);
+    // 3. status done.
     snapshot_->finish();
     pending_progress_.reset();
     state_.snapshot = snapshot_->progress();
