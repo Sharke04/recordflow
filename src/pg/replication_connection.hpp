@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include "core/version.hpp"
 #include "pg/conninfo.hpp"
 
 struct pg_conn;
@@ -30,6 +31,13 @@ private:
     std::size_t size_ = 0;
 };
 
+struct SystemIdentity {
+    std::string system_id;
+    std::uint32_t timeline = 0;
+    core::Lsn xlogpos = 0;
+    std::string dbname;
+};
+
 // A `replication=database` connection: START_REPLICATION, reading CopyData
 // frames and sending standby status updates.
 class ReplicationConnection {
@@ -41,9 +49,14 @@ public:
     ReplicationConnection(const ReplicationConnection&) = delete;
     ReplicationConnection& operator=(const ReplicationConnection&) = delete;
 
+    // IDENTIFY_SYSTEM: the cluster identity and the current WAL position.
+    SystemIdentity identify_system();
+
+    // START_REPLICATION from `start_lsn` (the server starts at the later of it
+    // and the slot's confirmed_flush_lsn), protocol 1, with logical messages.
     // Errors are classified by pg/errors (e.g. a missing slot: InterventionError,
     // a slot used by another walsender: SlotBusyError).
-    void start(const std::string& slot, const std::string& publication);
+    void start(const std::string& slot, const std::string& publication, core::Lsn start_lsn);
 
     // Returns the next frame if one arrives within `timeout`, otherwise
     // std::nullopt (also when a signal interrupted the wait or the server ended
@@ -58,6 +71,8 @@ public:
 
 private:
     void finish_copy();
+    std::string escape_identifier(const std::string& name);
+    std::string escape_literal(const std::string& text);
 
     pg_conn* conn_ = nullptr;
     bool ended_ = false;
