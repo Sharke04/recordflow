@@ -21,6 +21,7 @@ const char* op_name(Op op) {
         case Op::Update:   return "UPDATE";
         case Op::Delete:   return "DELETE";
         case Op::Truncate: return "TRUNCATE";
+        case Op::Read:     return "READ";
     }
     return "?";
 }
@@ -33,12 +34,6 @@ const char* replica_identity_name(char c) {
         case 'i': return "index";
         default:  return "?";
     }
-}
-
-std::string format_lsn(std::uint64_t lsn) {
-    const auto high = static_cast<std::uint32_t>(lsn >> 32);
-    const auto low = static_cast<std::uint32_t>(lsn);
-    return std::format("{:X}/{:X}", high, low);
 }
 
 std::string format_timestamp(std::int64_t micros) {
@@ -93,9 +88,11 @@ void print_change_event(const core::ChangeEvent& event) {
     std::printf("ChangeEvent\n");
     std::printf("  op          = %s\n", op_name(event.op));
     std::printf("  table       = %s\n", table.c_str());
+    std::printf("  source      = %s\n", event.source == core::EventSource::Log ? "log" : "snapshot");
     std::printf("  key_columns = %s\n", format_key_columns(event.key_columns).c_str());
+    std::printf("  key         = %s\n", format_key_columns(event.key).c_str());
     std::printf("  xid         = %u\n", event.xid);
-    std::printf("  lsn         = %s\n", format_lsn(event.lsn).c_str());
+    std::printf("  version     = %s\n", event.version.str().c_str());
     std::printf("  commit_ts   = %s\n", format_timestamp(event.commit_ts).c_str());
     std::printf("  before      = %s\n", format_row(event.before).c_str());
     std::printf("  after       = %s\n", format_row(event.after).c_str());
