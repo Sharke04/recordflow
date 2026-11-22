@@ -1,4 +1,4 @@
-#include "stream/parser/pgoutput_parser.hpp"
+#include "pgoutput/decoder.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -122,7 +122,7 @@ std::string format_timestamp(std::int64_t micros) {
 
 }
 
-std::string PgoutputParser::relation_label(std::uint32_t oid) const {
+std::string PgoutputDecoder::relation_label(std::uint32_t oid) const {
     const auto it = relations_.find(oid);
     if (it != relations_.end()) {
         return it->second.schema + "." + it->second.name;
@@ -130,7 +130,7 @@ std::string PgoutputParser::relation_label(std::uint32_t oid) const {
     return "oid=" + std::to_string(oid);
 }
 
-ParsedMessage PgoutputParser::handle_message(const char* data, std::size_t len) {
+ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len) {
     if (len == 0)
         return {};
 

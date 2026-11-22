@@ -39,7 +39,7 @@ target_link_libraries(clickhouse-cpp::clickhouse-cpp INTERFACE
 
 add_library(recordflow_core
     src/config.cpp
-    src/stream/parser/pgoutput_parser.cpp
+    src/pgoutput/decoder.cpp
     src/stream/printer/change_event_printer.cpp
     src/stream/replication_stream.cpp)
 
