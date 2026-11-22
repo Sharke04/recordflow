@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "stream/printer/change_event_printer.hpp"
+#include "runtime/log.hpp"
 
 namespace recordflow::pgoutput {
 
@@ -227,7 +228,7 @@ ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len)
         std::fflush(stdout);
         return parsed;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "parse error: %s\n", e.what());
+        log::error("parse error: {}", e.what());
         return {};
     }
 }
