@@ -54,6 +54,7 @@ add_library(recordflow_core
     src/runtime/log.cpp
     src/sink/clickhouse/type_mapping.cpp
     src/sink/clickhouse/value_converter.cpp
+    src/sink/tx_buffer.cpp
     src/stream/printer/change_event_printer.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
