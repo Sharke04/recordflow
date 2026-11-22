@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "stream/model/change_event.hpp"
-#include "stream/wire.hpp"
+#include "pgoutput/wire.hpp"
 
 namespace pgoutput {
 
