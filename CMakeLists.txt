@@ -44,6 +44,7 @@ add_library(recordflow_core
     src/config/describe.cpp
     src/config/fields.cpp
     src/config/validate.cpp
+    src/pg/catalog.cpp
     src/pg/conninfo.cpp
     src/pg/errors.cpp
     src/pg/query_connection.cpp
