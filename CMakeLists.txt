@@ -39,6 +39,7 @@ target_link_libraries(clickhouse-cpp::clickhouse-cpp INTERFACE
 
 add_library(recordflow_core
     src/app/engine.cpp
+    src/core/schema_guard.cpp
     src/core/transaction_assembler.cpp
     src/config/config_loader.cpp
     src/config/describe.cpp
