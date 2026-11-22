@@ -1,0 +1,7 @@
+# Only the sources the image build needs; never local secrets or state.
+*
+!vcpkg.json
+!CMakeLists.txt
+!CMakePresets.json
+!src/
+!docker/recordflow/
