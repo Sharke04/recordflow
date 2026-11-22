@@ -13,22 +13,7 @@ namespace recordflow::pg {
 
 namespace {
 
-bool has_param(const KeyValues& params, const std::string& keyword) {
-    for (const auto& param : params) {
-        if (param.first == keyword)
-            return true;
-    }
-    return false;
-}
-
-PGconn* connect_replication(KeyValues params) {
-    // Open a logical replication connection, required for START_REPLICATION
-    params.emplace_back("replication", "database");
-
-    if (!has_param(params, "client_encoding")) {
-        params.emplace_back("client_encoding", "UTF8");
-    }
-
+PGconn* connect(const KeyValues& params) {
     std::vector<const char*> keywords, values;
     for (const auto& [keyword, value] : params) {
         keywords.push_back(keyword.c_str());
@@ -59,8 +44,7 @@ CopyData::~CopyData() {
     if (data_ != nullptr) PQfreemem(data_);
 }
 
-ReplicationConnection::ReplicationConnection(KeyValues params)
-    : conn_(connect_replication(std::move(params))) {
+ReplicationConnection::ReplicationConnection(const KeyValues& params) : conn_(connect(params)) {
     if (PQstatus(conn_) != CONNECTION_OK) {
         const std::string error = PQerrorMessage(conn_);
         PQfinish(conn_);
