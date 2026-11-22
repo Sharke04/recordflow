@@ -5,6 +5,7 @@
 #include <clickhouse/columns/decimal.h>
 #include <clickhouse/columns/lowcardinality.h>
 #include <clickhouse/columns/string.h>
+#include <clickhouse/columns/uuid.h>
 
 #include <algorithm>
 #include <charconv>
@@ -32,6 +33,7 @@ ch::ColumnRef make_column(const ChType& type) {
         case ChKind::Decimal:
             return std::make_shared<ch::ColumnDecimal>(static_cast<std::size_t>(type.precision),
                                                        static_cast<std::size_t>(type.scale));
+        case ChKind::Uuid:                 return std::make_shared<ch::ColumnUUID>();
         case ChKind::Date32:               return std::make_shared<ch::ColumnDate32>();
         case ChKind::DateTime64:           return std::make_shared<ch::ColumnDateTime64>(6);
         case ChKind::DateTime64Utc:        return std::make_shared<ch::ColumnDateTime64>(6, "UTC");
@@ -216,6 +218,46 @@ std::int64_t clamp_micros(const Temporal& t, const std::string& column, std::str
     return micros;
 }
 
+int hex_digit(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+// "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" -> (high 64 bits, low 64 bits)
+ch::UUID parse_uuid(std::string_view text, const std::string& column) {
+    std::uint64_t halves[2] = {0, 0};
+    int digits = 0;
+    for (char c : text) {
+        if (c == '-') continue;
+        const int value = hex_digit(c);
+        if (value < 0 || digits >= 32) {
+            throw ConversionError(std::format("column {}: '{}' is not a valid uuid", column, text));
+        }
+        halves[digits / 16] = (halves[digits / 16] << 4) | static_cast<std::uint64_t>(value);
+        ++digits;
+    }
+    if (digits != 32) throw ConversionError(std::format("column {}: '{}' is not a valid uuid", column, text));
+    return {halves[0], halves[1]};
+}
+
+// bytea_output=hex: "\x48656c6c6f" -> "Hello"
+std::string parse_bytea(std::string_view text, const std::string& column) {
+    if (!text.starts_with("\\x") || text.size() % 2 != 0) {
+        throw ConversionError(std::format("column {}: bytea value is not in hex format", column));
+    }
+    std::string bytes;
+    bytes.reserve((text.size() - 2) / 2);
+    for (std::size_t i = 2; i < text.size(); i += 2) {
+        const int high = hex_digit(text[i]);
+        const int low = hex_digit(text[i + 1]);
+        if (high < 0 || low < 0) throw ConversionError(std::format("column {}: invalid hex in bytea value", column));
+        bytes.push_back(static_cast<char>((high << 4) | low));
+    }
+    return bytes;
+}
+
 bool parse_bool(std::string_view text, const std::string& column) {
     if (text == "t" || text == "true") return true;
     if (text == "f" || text == "false") return false;
@@ -274,8 +316,16 @@ void ColumnBuilder::append_text(std::string_view text) {
         case ChKind::LowCardinalityString:
             nested_->As<ch::ColumnLowCardinalityT<ch::ColumnString>>()->Append(text);
             return;
+        case ChKind::Uuid:
+            nested_->As<ch::ColumnUUID>()->Append(parse_uuid(text, name_));
+            return;
         case ChKind::String:
-            nested_->As<ch::ColumnString>()->Append(text);
+            if (type_.source == PgText::Bytea) {
+                nested_->As<ch::ColumnString>()->Append(parse_bytea(text, name_));
+            } else {
+                // text, varchar, json(b), arrays, interval, time, wide numerics, custom types
+                nested_->As<ch::ColumnString>()->Append(text);
+            }
             return;
         default:
             throw ConversionError(std::format("column {}: type {} is not supported yet", name_, type_.name()));
