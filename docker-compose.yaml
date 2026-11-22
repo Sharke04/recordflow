@@ -14,10 +14,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mydb}
       POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD in .env (see .env.example)}
+      RECORDFLOW_PG_PASSWORD: ${RECORDFLOW_PG_PASSWORD:?set RECORDFLOW_PG_PASSWORD in .env (see .env.example)}
     ports:
       - "5432:5432"
     volumes:
       - recordflow_pg_data:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
