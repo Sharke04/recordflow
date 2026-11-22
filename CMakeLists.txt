@@ -38,12 +38,12 @@ target_link_libraries(clickhouse-cpp::clickhouse-cpp INTERFACE
     absl::int128 cityhash LZ4::lz4 zstd::libzstd)
 
 add_library(recordflow_core
+    src/app/engine.cpp
     src/config.cpp
     src/pg/replication_connection.cpp
     src/pgoutput/decoder.cpp
     src/runtime/log.cpp
-    src/stream/printer/change_event_printer.cpp
-    src/stream/replication_stream.cpp)
+    src/stream/printer/change_event_printer.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
 target_link_libraries(recordflow_core
