@@ -1,6 +1,10 @@
 #include "pg/replication_connection.hpp"
 
 #include <libpq-fe.h>
+#include <poll.h>
+
+#include <cerrno>
+#include <cstring>
 
 #include <utility>
 #include <vector>
@@ -79,16 +83,29 @@ void ReplicationConnection::start(const std::string& slot, const std::string& pu
     }
 }
 
-std::optional<CopyData> ReplicationConnection::read() {
-    for (;;) {
+std::optional<CopyData> ReplicationConnection::poll(std::chrono::milliseconds timeout) {
+    if (ended_) return std::nullopt;
+    for (bool waited = false;; waited = true) {
         char* data = nullptr;
-        const int len = PQgetCopyData(conn_, &data, 0);
+        const int len = PQgetCopyData(conn_, &data, /*async=*/1);
         if (len > 0) return CopyData(data, static_cast<std::size_t>(len));
         if (len == -1) {
+            ended_ = true;
             finish_copy();
             return std::nullopt;
         }
         if (len == -2) raise(Resource::PostgresReplication, "stream read failed", conn_);
+        if (waited) return std::nullopt;  // no complete message yet
+
+        pollfd fd{PQsocket(conn_), POLLIN, 0};
+        const int ready = ::poll(&fd, 1, static_cast<int>(timeout.count()));
+        if (ready < 0) {
+            if (errno == EINTR) return std::nullopt;  // a signal; the caller checks its flags
+            throw TransientError(Resource::PostgresReplication,
+                                 std::string("poll failed: ") + std::strerror(errno));
+        }
+        if (ready == 0) return std::nullopt;
+        if (PQconsumeInput(conn_) == 0) raise(Resource::PostgresReplication, "stream read failed", conn_);
     }
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -44,9 +45,13 @@ public:
     // a slot used by another walsender: SlotBusyError).
     void start(const std::string& slot, const std::string& publication);
 
-    // Blocks until the next frame; std::nullopt when the server ended the
-    // stream. Throws TransientError if reading fails.
-    std::optional<CopyData> read();
+    // Returns the next frame if one arrives within `timeout`, otherwise
+    // std::nullopt (also when a signal interrupted the wait or the server ended
+    // the stream; see ended()). Never blocks longer than `timeout`.
+    std::optional<CopyData> poll(std::chrono::milliseconds timeout);
+
+    // True once the server has ended the COPY stream.
+    bool ended() const { return ended_; }
 
     // Reports `lsn` as written, flushed and applied. Failures are logged.
     void send_standby_status(std::uint64_t lsn);
@@ -55,6 +60,7 @@ private:
     void finish_copy();
 
     pg_conn* conn_ = nullptr;
+    bool ended_ = false;
 };
 
 }  // namespace recordflow::pg
