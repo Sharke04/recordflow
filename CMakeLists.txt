@@ -40,6 +40,8 @@ target_link_libraries(clickhouse-cpp::clickhouse-cpp INTERFACE
 add_library(recordflow_core
     src/app/engine.cpp
     src/config.cpp
+    src/config/config_loader.cpp
+    src/config/fields.cpp
     src/pg/replication_connection.cpp
     src/pgoutput/decoder.cpp
     src/runtime/log.cpp
