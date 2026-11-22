@@ -5,6 +5,7 @@
 #include <exception>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "pg/conninfo.hpp"
 #include "pg/replication_connection.hpp"
@@ -18,38 +19,67 @@ namespace recordflow::app {
 
 namespace {
 
-struct StreamState {
-    std::uint64_t confirmed = 0;
-    bool in_transaction = false;
+template <typename... Handlers>
+struct Overloaded : Handlers... {
+    using Handlers::operator()...;
 };
 
-void handle_xlog_data(pg::ReplicationConnection& conn, pgoutput::ByteReader& frame,
-                      pgoutput::PgoutputDecoder& decoder, StreamState& state) {
-    frame.getLong();
-    frame.getLong();
-    frame.getLong();
-    const pgoutput::ParsedMessage msg =
-        decoder.handle_message(frame.rest(), frame.remaining());
+struct StreamState {
+    core::Lsn confirmed = 0;
+    bool in_transaction = false;
+    pgoutput::Begin current;
+};
 
-    if (msg.relation) {
-        print_relation(*msg.relation);
+core::ChangeEvent event_for(core::Op op, const pgoutput::TableInfo& table,
+                            const pgoutput::Begin& transaction) {
+    core::ChangeEvent event;
+    event.op = op;
+    event.schema_name = table.schema;
+    event.table = table.name;
+    for (const auto& column : table.columns) {
+        if (column.part_of_key) event.key_columns.push_back(column.name);
     }
-    for (const core::ChangeEvent& event : msg.events) {
-        print_change_event(event);
-    }
+    event.xid = transaction.xid;
+    event.version.commit_lsn = transaction.final_lsn;
+    event.commit_ts = transaction.commit_ts;
+    return event;
+}
 
-    if (msg.type == 'B') {
-        state.in_transaction = true;
-    } else if (msg.type == 'C') {
-        state.in_transaction = false;
-        state.confirmed = std::max(state.confirmed, msg.commit_end_lsn);
-        conn.send_standby_status(state.confirmed);
-    }
+void handle_message(pg::ReplicationConnection& conn, const pgoutput::Message& message,
+                    StreamState& state) {
+    std::visit(Overloaded{
+                   [&](const pgoutput::Begin& begin) {
+                       state.in_transaction = true;
+                       state.current = begin;
+                       print_begin(begin);
+                   },
+                   [&](const pgoutput::Commit& commit) {
+                       state.in_transaction = false;
+                       print_commit(commit);
+                       state.confirmed = std::max(state.confirmed, commit.end_lsn);
+                       conn.send_standby_status(state.confirmed);
+                   },
+                   [&](const pgoutput::Relation& relation) { print_relation(*relation.table); },
+                   [&](const pgoutput::Change& change) {
+                       core::ChangeEvent event = event_for(change.op, *change.table, state.current);
+                       event.before = change.before;
+                       event.after = change.after;
+                       print_change_event(event);
+                   },
+                   [&](const pgoutput::Truncate& truncate) {
+                       for (const auto& table : truncate.tables) {
+                           print_change_event(event_for(core::Op::Truncate, *table, state.current));
+                       }
+                   },
+                   [&](const pgoutput::LogicalMessage&) {},
+                   [&](const pgoutput::Other& other) { print_other(other); },
+               },
+               message);
 }
 
 void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& frame,
                       StreamState& state) {
-    const auto wal_end = static_cast<std::uint64_t>(frame.getLong());
+    const auto wal_end = static_cast<core::Lsn>(frame.getLong());
     frame.getLong();
     const bool reply_requested = frame.get() != 0;
     if (!state.in_transaction) {
@@ -69,7 +99,10 @@ int run_stream(pg::ReplicationConnection& conn) {
             pgoutput::ByteReader frame(copy->data(), copy->size());
             switch (frame.get()) {
                 case 'w':
-                    handle_xlog_data(conn, frame, decoder, state);
+                    frame.getLong();  // start of WAL data
+                    frame.getLong();  // current end of WAL
+                    frame.getLong();  // send time
+                    handle_message(conn, decoder.decode(frame.rest(), frame.remaining()), state);
                     break;
                 case 'k':
                     handle_keepalive(conn, frame, state);

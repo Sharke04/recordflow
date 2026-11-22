@@ -2,75 +2,33 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <optional>
-#include <string>
+#include <memory>
 #include <unordered_map>
-#include <vector>
 
-#include "core/change_event.hpp"
+#include "pgoutput/messages.hpp"
 #include "pgoutput/wire.hpp"
 
 namespace recordflow::pgoutput {
 
-using core::ChangeEvent;
-using core::Op;
-using core::Row;
-using core::Value;
-
-struct ColumnInfo {
-    std::string name;
-    std::uint32_t type_oid;
-    std::int32_t type_mod;
-    bool part_of_key;
-};
-
-struct TableInfo {
-    std::uint32_t oid = 0;
-    std::string schema;
-    std::string name;
-    char replica_identity = '\0';
-    std::vector<ColumnInfo> columns;
-};
-
-class WalMessageDecoder {
-public:
-    char peekType(const ByteReader& buf) const { return buf.typeAt(); }
-    std::uint32_t peekOid(const ByteReader& buf) const {
-        return static_cast<std::uint32_t>(buf.intAt(1));
-    }
-
-    TableInfo decodeRelation(ByteReader& buf) const;
-    ChangeEvent decodeInsert(ByteReader& buf, const TableInfo& rel) const;
-    ChangeEvent decodeUpdate(ByteReader& buf, const TableInfo& rel) const;
-    ChangeEvent decodeDelete(ByteReader& buf, const TableInfo& rel) const;
-
-private:
-    Row decodeTuple(ByteReader& buf, const TableInfo& rel) const;
-};
-
-struct TransactionInfo {
-    std::uint32_t xid = 0;
-    std::uint64_t lsn = 0;
-    std::int64_t commit_ts = 0;
-};
-
-struct ParsedMessage {
-    char type = 0;
-    std::uint64_t commit_end_lsn = 0;
-    std::vector<ChangeEvent> events;
-    std::optional<TableInfo> relation;
-};
-
+// Decodes pgoutput messages and keeps the Relation messages it has seen, since
+// row changes refer to their table only by OID.
 class PgoutputDecoder {
 public:
-    ParsedMessage handle_message(const char* data, std::size_t len);
+    // Decodes one message (the payload of an XLogData frame). Throws
+    // std::runtime_error if the message is malformed.
+    Message decode(const char* data, std::size_t len);
+
+    // Forgets cached relations; a new replication session resends them.
+    void reset();
 
 private:
-    std::string relation_label(std::uint32_t oid) const;
+    std::shared_ptr<const TableInfo> relation(std::uint32_t oid) const;
+    Relation decode_relation(ByteReader& buf);
+    Change decode_change(ByteReader& buf, core::Op op);
+    Truncate decode_truncate(ByteReader& buf) const;
+    core::Row decode_tuple(ByteReader& buf, const TableInfo& table) const;
 
-    WalMessageDecoder decoder_;
-    std::unordered_map<std::uint32_t, TableInfo> relations_;
-    TransactionInfo transaction_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<const TableInfo>> relations_;
 };
 
 }  // namespace recordflow::pgoutput
