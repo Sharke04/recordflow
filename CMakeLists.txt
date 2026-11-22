@@ -41,6 +41,7 @@ add_library(recordflow_core
     src/app/engine.cpp
     src/config.cpp
     src/config/config_loader.cpp
+    src/config/describe.cpp
     src/config/fields.cpp
     src/config/validate.cpp
     src/pg/replication_connection.cpp
