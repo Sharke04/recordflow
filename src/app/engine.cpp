@@ -125,6 +125,8 @@ int Engine::run() {
     std::string key;
     for (const auto& name : table.primary_key) key += (key.empty() ? "" : ", ") + name;
     log::info("Source table {}: primary key ({}); columns: {}", table.qualified(), key, columns);
+    pg::check_publication(query, publication, table);
+    pg::check_watermark_privilege(query);
 
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
                                                                pg::ConnectionKind::Replication));

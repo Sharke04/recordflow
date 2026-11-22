@@ -4,6 +4,7 @@
 #include <string>
 
 #include "runtime/errors.hpp"
+#include "runtime/log.hpp"
 
 namespace recordflow::pg {
 
@@ -72,6 +73,57 @@ core::TableSchema read_table_schema(QueryConnection& query, const std::string& q
             "source table {} has REPLICA IDENTITY NOTHING, so deletes carry no key; use DEFAULT", qualified_table));
     }
     return table;
+}
+
+void check_publication(QueryConnection& query, const std::string& publication,
+                       const core::TableSchema& table) {
+    const QueryResult exists =
+        query.exec("SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)", {publication});
+    if (text(exists, 0, 0) != "t") {
+        throw InterventionError(std::format("publication '{}' does not exist", publication));
+    }
+
+    const QueryResult tables = query.exec(
+        "SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = $1 ORDER BY 1, 2",
+        {publication});
+    bool found = false;
+    for (std::size_t r = 0; r < tables.size(); ++r) {
+        if (text(tables, r, 0) == table.schema && text(tables, r, 1) == table.name) {
+            found = true;
+        } else {
+            log::warn("publication '{}' also contains {}.{}; its changes are skipped (Recordflow v1 "
+                      "transfers one table)",
+                      publication, text(tables, r, 0), text(tables, r, 1));
+        }
+    }
+    if (!found) {
+        throw InterventionError(std::format("publication '{}' does not include {}; run: ALTER PUBLICATION {} "
+                                            "ADD TABLE {}",
+                                            publication, table.qualified(), publication, table.qualified()));
+    }
+}
+
+void check_watermark_privilege(QueryConnection& query) {
+    const QueryResult result = query.exec(
+        "SELECT current_setting('server_version_num')::int, current_user, "
+        "       coalesce(bool_or(has_function_privilege(p.oid, 'EXECUTE')), false) "
+        "FROM pg_proc p "
+        "WHERE p.proname = 'pg_logical_emit_message' "
+        "  AND p.pronamespace = 'pg_catalog'::regnamespace "
+        "  AND p.proargtypes[2] = 'text'::regtype");
+    const int version = std::stoi(text(result, 0, 0));
+    const std::string& user = text(result, 0, 1);
+    if (version < 140000) {
+        throw InterventionError(std::format(
+            "PostgreSQL 14 or newer is required (logical messages in pgoutput), the server is {}", version));
+    }
+    if (text(result, 0, 2) != "t") {
+        const char* signature = version >= 170000 ? "boolean, text, text, boolean" : "boolean, text, text";
+        throw InterventionError(std::format(
+            "role {} may not call pg_logical_emit_message, which snapshots need for watermarks; run: "
+            "GRANT EXECUTE ON FUNCTION pg_logical_emit_message({}) TO {}",
+            user, signature, user));
+    }
 }
 
 }  // namespace recordflow::pg

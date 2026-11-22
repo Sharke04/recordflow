@@ -12,4 +12,14 @@ namespace recordflow::pg {
 // REPLICA IDENTITY NOTHING is an InterventionError.
 core::TableSchema read_table_schema(QueryConnection& query, const std::string& qualified_table);
 
+// The publication must exist and include the table (InterventionError
+// otherwise); other tables in it are reported as warnings (decision 4.4).
+void check_publication(QueryConnection& query, const std::string& publication,
+                       const core::TableSchema& table);
+
+// PostgreSQL 14+ and EXECUTE on pg_logical_emit_message (looked up by name,
+// since PostgreSQL 17 added a fourth parameter). InterventionError otherwise,
+// with the GRANT statement that fixes it.
+void check_watermark_privilege(QueryConnection& query);
+
 }  // namespace recordflow::pg
