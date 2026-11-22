@@ -85,21 +85,25 @@ int run_stream(pg::ReplicationConnection& conn) {
 
 }  // namespace
 
-Engine::Engine(std::string slot, std::string publication)
-    : slot_(std::move(slot)), publication_(std::move(publication)) {}
+Engine::Engine(config::Config config) : config_(std::move(config)) {}
 
 int Engine::run() {
-    Config config;
+    // Connection parameters still come from the legacy recordflow.conf until
+    // the [source] conninfo is wired in.
+    Config legacy;
     try {
-        config = load_config();
+        legacy = load_config();
     } catch (const std::exception& e) {
         throw ConfigError(e.what());
     }
 
-    pg::ReplicationConnection conn(std::move(config.params));
-    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot_, publication_);
+    const std::string& slot = config_.source.slot.value;
+    const std::string& publication = config_.source.publication.value;
 
-    conn.start(slot_, publication_);
+    pg::ReplicationConnection conn(std::move(legacy.params));
+    log::info("Connected; streaming from slot '{}' via publication '{}'.", slot, publication);
+
+    conn.start(slot, publication);
     log::info("Streaming (Ctrl+C to stop)...");
     return run_stream(conn);
 }
