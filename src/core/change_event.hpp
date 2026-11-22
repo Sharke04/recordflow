@@ -39,7 +39,10 @@ struct ChangeEvent {
     std::optional<Row> after;
     Version version;
     Xid xid = 0;
-    std::int64_t commit_ts = 0;
+    std::int64_t commit_ts = 0;  // microseconds since 2000-01-01 00:00:00 UTC (PostgreSQL epoch)
 };
+
+// The PostgreSQL epoch in microseconds since the Unix epoch.
+inline constexpr std::int64_t kPostgresEpochUnixMicros = 946'684'800'000'000;
 
 }  // namespace recordflow::core
