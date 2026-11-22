@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "config/fields.hpp"
+#include "config/validate.hpp"
 #include "runtime/errors.hpp"
 
 namespace recordflow::config {
@@ -144,6 +145,7 @@ Config load(const LoadOptions& options) {
         apply_toml_file(config, options.default_path);
     }
     apply_env(config, options.env);
+    validate(config);
     return config;
 }
 

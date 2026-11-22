@@ -36,7 +36,7 @@ struct LoadOptions {
     EnvLookup env = process_environment();
 };
 
-// Defaults, then the TOML file, then the environment.
+// Defaults, then the TOML file, then the environment; the result is validated.
 Config load(const LoadOptions& options);
 
 }  // namespace recordflow::config
