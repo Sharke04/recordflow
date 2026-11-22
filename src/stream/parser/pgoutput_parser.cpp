@@ -16,7 +16,7 @@ namespace {
 ChangeEvent event_for(Op op, const TableInfo& rel) {
     ChangeEvent event;
     event.op = op;
-    event.schema = rel.schema;
+    event.schema_name = rel.schema;
     event.table = rel.name;
     for (const auto& column : rel.columns) {
         if (column.part_of_key)
@@ -205,7 +205,7 @@ ParsedMessage PgoutputParser::handle_message(const char* data, std::size_t len) 
                     event.op = Op::Truncate;
                     const auto it = relations_.find(oid);
                     if (it != relations_.end()) {
-                        event.schema = it->second.schema;
+                        event.schema_name = it->second.schema;
                         event.table = it->second.name;
                     } else {
                         event.table = relation_label(oid);
