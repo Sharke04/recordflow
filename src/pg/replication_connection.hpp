@@ -66,16 +66,30 @@ public:
     // True once the server has ended the COPY stream.
     bool ended() const { return ended_; }
 
-    // Reports `lsn` as written, flushed and applied. Failures are logged.
-    void send_standby_status(std::uint64_t lsn);
+    // Raises the position reported to the server as written, flushed and
+    // applied (it never moves backwards). The engine decides when data is safe.
+    void confirm(core::Lsn lsn);
+    core::Lsn confirmed() const { return confirmed_; }
+
+    // Sends a standby status update if the confirmed position changed, if the
+    // last one is older than the status interval, or if `force` (the server
+    // asked for a reply). Failures are logged.
+    void maybe_send_status(std::chrono::steady_clock::time_point now, bool force = false);
+
+    static constexpr std::chrono::seconds kStatusInterval{10};
 
 private:
     void finish_copy();
     std::string escape_identifier(const std::string& name);
     std::string escape_literal(const std::string& text);
 
+    void send_status(std::chrono::steady_clock::time_point now);
+
     pg_conn* conn_ = nullptr;
     bool ended_ = false;
+    core::Lsn confirmed_ = 0;
+    core::Lsn last_sent_ = 0;
+    std::chrono::steady_clock::time_point last_sent_at_{};
 };
 
 }  // namespace recordflow::pg

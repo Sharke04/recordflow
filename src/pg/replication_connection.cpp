@@ -3,6 +3,7 @@
 #include <libpq-fe.h>
 #include <poll.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <format>
@@ -162,22 +163,36 @@ void ReplicationConnection::finish_copy() {
     }
 }
 
-void ReplicationConnection::send_standby_status(std::uint64_t lsn) {
-    constexpr std::uint64_t kNoClientTime = 0;
+void ReplicationConnection::confirm(core::Lsn lsn) {
+    confirmed_ = std::max(confirmed_, lsn);
+}
+
+void ReplicationConnection::maybe_send_status(std::chrono::steady_clock::time_point now, bool force) {
+    if (force || confirmed_ != last_sent_ || now - last_sent_at_ >= kStatusInterval) send_status(now);
+}
+
+void ReplicationConnection::send_status(std::chrono::steady_clock::time_point now) {
+    // Client clock in microseconds since 2000-01-01, as the protocol expects.
+    constexpr std::int64_t kPostgresEpochUnixSeconds = 946684800;
+    const auto unix_micros = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto client_time = static_cast<std::uint64_t>(unix_micros - kPostgresEpochUnixSeconds * 1000000);
     constexpr std::uint8_t kNoReplyRequested = 0;
 
     pgoutput::ByteWriter msg;
     msg.put('r')
-       .putLong(lsn)
-       .putLong(lsn)
-       .putLong(lsn)
-       .putLong(kNoClientTime)
+       .putLong(confirmed_)
+       .putLong(confirmed_)
+       .putLong(confirmed_)
+       .putLong(client_time)
        .put(kNoReplyRequested);
 
-    if (PQputCopyData(conn_, msg.data(), static_cast<int>(msg.size())) < 0 ||
-        PQflush(conn_) < 0) {
+    if (PQputCopyData(conn_, msg.data(), static_cast<int>(msg.size())) < 0 || PQflush(conn_) < 0) {
         log::warn("could not send standby status: {}", PQerrorMessage(conn_));
+        return;
     }
+    last_sent_ = confirmed_;
+    last_sent_at_ = now;
 }
 
 }  // namespace recordflow::pg
