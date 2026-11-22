@@ -100,6 +100,18 @@ std::string StreamTable::state_last_flushed_lsn() const {
     return json.substr(begin + key.size(), end - begin - key.size());
 }
 
+std::optional<state::State> StreamTable::state() const {
+    std::ifstream in(data_dir_ / "recordflow.state.json");
+    if (!in) return std::nullopt;
+    std::ostringstream text;
+    text << in.rdbuf();
+    try {
+        return state::from_json(text.str());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 std::vector<std::string> StreamTable::source_rows() {
     std::vector<std::string> rows;
     // numeric(12,2) -> Decimal(12, 2): ClickHouse prints no trailing zeros.

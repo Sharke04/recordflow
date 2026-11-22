@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "state/state.hpp"
 #include "support/process.hpp"
 #include "support/support.hpp"
 
@@ -44,6 +45,8 @@ public:
     // confirmed_flush_lsn of the slot and last_flushed_lsn of the state file.
     std::string slot_confirmed_lsn();
     std::string state_last_flushed_lsn() const;
+    // The state file; nullopt while it does not exist or cannot be parsed.
+    std::optional<state::State> state() const;
 
     // Source rows (ORDER BY id) and the rows of <target>_current, both as
     // "id|name|amount" with the values as the converter writes them.
