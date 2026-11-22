@@ -9,7 +9,7 @@
 
 #include "stream/printer/change_event_printer.hpp"
 
-namespace pgoutput {
+namespace recordflow::pgoutput {
 
 namespace {
 
@@ -27,7 +27,7 @@ ChangeEvent event_for(Op op, const TableInfo& rel) {
 
 }
 
-TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteReader& buf) const {
+TableInfo WalMessageDecoder::decodeRelation(ByteReader& buf) const {
     buf.get();
     TableInfo t;
     t.oid = static_cast<std::uint32_t>(buf.getInt());
@@ -47,7 +47,7 @@ TableInfo WalMessageDecoder::decodeRelation(pgwire::ByteReader& buf) const {
     return t;
 }
 
-ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteReader& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeInsert(ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
@@ -56,7 +56,7 @@ ChangeEvent WalMessageDecoder::decodeInsert(pgwire::ByteReader& buf, const Table
     return event;
 }
 
-ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteReader& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeUpdate(ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     ChangeEvent event = event_for(Op::Update, rel);
@@ -69,7 +69,7 @@ ChangeEvent WalMessageDecoder::decodeUpdate(pgwire::ByteReader& buf, const Table
     return event;
 }
 
-ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteReader& buf, const TableInfo& rel) const {
+ChangeEvent WalMessageDecoder::decodeDelete(ByteReader& buf, const TableInfo& rel) const {
     buf.get();
     buf.getInt();
     buf.get();
@@ -78,7 +78,7 @@ ChangeEvent WalMessageDecoder::decodeDelete(pgwire::ByteReader& buf, const Table
     return event;
 }
 
-Row WalMessageDecoder::decodeTuple(pgwire::ByteReader& buf, const TableInfo& rel) const {
+Row WalMessageDecoder::decodeTuple(ByteReader& buf, const TableInfo& rel) const {
     const std::int16_t ncols = buf.getShort();
     Row row;
     if (ncols > 0) row.reserve(static_cast<std::size_t>(ncols));
@@ -103,11 +103,7 @@ Row WalMessageDecoder::decodeTuple(pgwire::ByteReader& buf, const TableInfo& rel
     return row;
 }
 
-}
-
 namespace {
-
-using namespace pgoutput;
 
 std::string format_lsn(std::uint64_t lsn) {
     const auto high = static_cast<std::uint32_t>(lsn >> 32);
@@ -135,7 +131,7 @@ ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len)
         return {};
 
     try {
-        pgwire::ByteReader buf(data, len);
+        ByteReader buf(data, len);
         ParsedMessage parsed;
         parsed.type = decoder_.peekType(buf);
         switch (parsed.type) {
@@ -235,3 +231,5 @@ ParsedMessage PgoutputDecoder::handle_message(const char* data, std::size_t len)
         return {};
     }
 }
+
+}  // namespace recordflow::pgoutput

@@ -6,6 +6,8 @@
 #include <string_view>
 #include <utility>
 
+namespace recordflow {
+
 namespace {
 
 constexpr std::string_view kWhitespace = " \t\r\n";
@@ -58,3 +60,5 @@ Config load_config(const std::string& path) {
 
     return config;
 }
+
+}  // namespace recordflow
