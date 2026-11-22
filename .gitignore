@@ -17,5 +17,10 @@ compile_commands.json
 
 # Local env / secrets
 .env
+recordflow.toml
+!docker/recordflow/recordflow.toml
 recordflow.conf
+
+# Recordflow state (decision 4)
+/data/
 /docs/

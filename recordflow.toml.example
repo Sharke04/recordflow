@@ -1,0 +1,52 @@
+# Recordflow configuration. Copy to recordflow.toml (git-ignored) and adjust.
+#
+# Only the four [source] keys are required; every other key shows its default.
+# Any key can be overridden by an environment variable named
+# RECORDFLOW_<SECTION>_<KEY> (e.g. RECORDFLOW_CLICKHOUSE_HOST), or by
+# RECORDFLOW_<SECTION>_<KEY>_FILE pointing to a file that holds the value.
+# Check the result with:  recordflow --check-config
+
+[source]
+# libpq connection string (key=value or postgresql:// URI). Do not put the
+# password here: use PGPASSWORD or ~/.pgpass, which libpq reads itself.
+conninfo    = "host=localhost port=5432 dbname=mydb user=recordflow"
+slot        = "recordflow_slot"   # created by the operator
+publication = "recordflow_pub"    # created by the operator
+table       = "public.orders"     # schema.table
+
+[clickhouse]
+host        = "localhost"
+port        = 9000
+database    = "recordflow"
+user        = "recordflow"
+# password: only through RECORDFLOW_CLICKHOUSE_PASSWORD(_FILE)
+compression = "lz4"               # lz4 | zstd | none
+# table = "public__orders"        # default: <schema>__<table>
+
+[state]
+data_dir = "data"
+
+[batch]
+max_rows     = 50000
+max_mb       = 32
+max_delay_ms = 1000
+
+[snapshot]
+on_start         = "always"       # always | if_incomplete
+chunk_size       = 1000
+chunk_delay_ms   = 0
+window_timeout_s = 60
+
+[output]
+sink = "clickhouse"               # clickhouse | jsonl
+
+[log]
+level = "info"                    # debug | info | warn | error
+
+[retry]
+initial_ms          = 1000
+max_ms              = 60000
+slot_busy_timeout_s = 300
+
+[shutdown]
+timeout_s = 8

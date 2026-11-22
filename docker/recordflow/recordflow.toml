@@ -1,0 +1,10 @@
+# Default configuration of the Recordflow Docker image.
+#
+# Only what differs inside the container is set here. Everything else comes
+# from RECORDFLOW_<SECTION>_<KEY> environment variables (e.g.
+# RECORDFLOW_SOURCE_CONNINFO, RECORDFLOW_SOURCE_TABLE, RECORDFLOW_CLICKHOUSE_HOST)
+# or from a full configuration file mounted over this one.
+# See recordflow.toml.example for every key.
+
+[state]
+data_dir = "/var/lib/recordflow"   # the image's volume
