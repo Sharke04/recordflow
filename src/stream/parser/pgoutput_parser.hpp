@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "stream/model/change_event.hpp"
+#include "core/change_event.hpp"
 #include "pgoutput/wire.hpp"
 
 namespace pgoutput {
