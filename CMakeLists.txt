@@ -51,6 +51,7 @@ add_library(recordflow_core
     src/pg/replication_connection.cpp
     src/pgoutput/decoder.cpp
     src/runtime/log.cpp
+    src/sink/clickhouse/type_mapping.cpp
     src/stream/printer/change_event_printer.cpp)
 
 target_include_directories(recordflow_core PUBLIC src)
