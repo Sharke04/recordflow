@@ -63,6 +63,13 @@ private:
     void handle_frame(const pg::CopyData& copy);
     void dispatch(const pgoutput::Message& message);
     void check_relation(const pgoutput::TableInfo& relation);
+
+    // Decisions 7.3 and 7.4: drops the open transaction, stores and confirms
+    // the complete ones and throws SchemaChangeError with the report.
+    [[noreturn]] void stop_on_schema_change(std::string_view where, core::Lsn detected, const std::string& diff);
+    std::string schema_change_report(const std::string& target, std::string_view where,
+                                     std::optional<core::Lsn> stored, std::optional<core::Lsn> detected,
+                                     const std::string& diff) const;
     bool tracked(const core::ChangeEvent& event) const;
 
     // Flushes when the batch policy says so (decision 4.5).
@@ -73,6 +80,8 @@ private:
     // file and confirmed at once if `now`, otherwise within the interval.
     void advance(core::Lsn lsn, bool now);
     void checkpoint_if_due(bool force = false);
+    // Writes a pending checkpoint and sends the position to the server now.
+    void confirm_now();
 
     config::Config config_;
     state::StateStore store_;
@@ -86,6 +95,7 @@ private:
     core::TransactionAssembler assembler_;
     sink::FlushPolicy policy_;
 
+    core::Lsn transaction_lsn_ = 0;  // commit LSN of the current (or last) transaction
     core::Lsn stored_lsn_ = 0;  // highest position known to be stored, maybe not yet in the state file
     std::chrono::steady_clock::time_point last_checkpoint_{};
 };

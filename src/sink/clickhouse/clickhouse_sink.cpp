@@ -169,20 +169,44 @@ void ClickHouseSink::write_rows() {
 std::optional<core::Lsn> ClickHouseSink::flush(bool include_open) {
     if (!rows_) throw std::logic_error("ClickHouseSink::flush before prepare");
     TxBuffer::Drained drained = buffer_.drain(include_open);
-    for (const auto& event : drained.events) {
-        if (event.op != core::Op::Truncate) {
-            rows_->add(event);
-            continue;
+    std::size_t written = 0;  // drained.events[0, written) are in ClickHouse
+    for (std::size_t i = 0; i < drained.events.size(); ++i) {
+        const core::ChangeEvent& event = drained.events[i];
+        try {
+            if (event.op != core::Op::Truncate) {
+                rows_->add(event);
+                continue;
+            }
+        } catch (const SchemaChangeError& e) {
+            write_before_failure(drained, written, i, e);
         }
         if (event.schema_name != source_.schema || event.table != source_.name) continue;  // decision 4.4
         // At its stream position (decisions 2.5 and 9.4): the rows before it
         // are written first, the rows after it go into the next block.
         write_rows();
         with_retry([&] { client_.Execute("TRUNCATE TABLE " + target()); });
+        written = i + 1;
         log::info("Truncated {} (TRUNCATE of {} at {}).", target(), source_.qualified(), event.version.str());
     }
     write_rows();
     return drained.last_commit_end;
+}
+
+void ClickHouseSink::write_before_failure(const TxBuffer::Drained& drained, std::size_t written,
+                                          std::size_t failed, const SchemaChangeError& error) {
+    // Decision 7.3: the complete transactions before the failing event are
+    // stored; the failing one and everything after it are not.
+    rows_->discard();
+    std::optional<core::Lsn> stored;
+    std::size_t end = written;
+    for (const auto& [events, commit_end] : drained.commits) {
+        if (events > failed) break;
+        stored = commit_end;
+        end = std::max(end, events);
+    }
+    for (std::size_t i = written; i < end; ++i) rows_->add(drained.events[i]);
+    write_rows();
+    throw FlushSchemaChangeError(error, stored, drained.events[failed].version);
 }
 
 void ClickHouseSink::sweep(core::Version, core::Version) {

@@ -38,22 +38,19 @@ struct Overloaded : Handlers... {
     using Handlers::operator()...;
 };
 
-// A difference between the source and an existing target found at startup
-// stops before anything is written (decisions 7.3 and 7.4).
-void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema& table, const std::string& slot) {
-    if (prepared.diff.empty()) return;
-    throw SchemaChangeError(
-        std::format("schema change detected on {} (target {})\n"
-                    "  detected at: startup\n"
-                    "  differences:\n{}\n"
-                    "  Recordflow does not handle schema changes in v1. To recover:\n"
-                    "    1. stop Recordflow\n"
-                    "    2. in ClickHouse: DROP VIEW {}_current; DROP TABLE {};\n"
-                    "    3. in PostgreSQL: SELECT pg_replication_slot_advance('{}', pg_current_wal_lsn());\n"
-                    "    4. start Recordflow (it recreates the table and runs a full snapshot)",
-                    table.qualified(), prepared.target, prepared.diff.text(), prepared.target, prepared.target,
-                    slot),
-        prepared.diff.text());
+// Indents every line of a schema difference by four spaces.
+std::string indented(const std::string& diff) {
+    std::string out;
+    std::size_t begin = 0;
+    while (begin <= diff.size()) {
+        std::size_t end = diff.find('\n', begin);
+        if (end == std::string::npos) end = diff.size();
+        std::string line = diff.substr(begin, end - begin);
+        line.erase(0, line.find_first_not_of(' '));
+        if (!line.empty()) out += (out.empty() ? "    " : "\n    ") + line;
+        begin = end + 1;
+    }
+    return out;
 }
 
 std::string describe_columns(const core::TableSchema& table) {
@@ -148,7 +145,14 @@ void Engine::startup() {
     }
     sink::PrepareResult prepared;
     retry_transient("ClickHouse", [&] { prepared = sink_->prepare(table_); });
-    check_prepared(prepared, table_, slot);
+    if (!prepared.diff.empty()) {
+        // Before the stream opens, nothing is written (decision 7.3).
+        throw SchemaChangeError(
+            schema_change_report(prepared.target, "startup",
+                                 stored ? std::optional(stored->last_flushed_lsn) : std::nullopt, std::nullopt,
+                                 prepared.diff.text()),
+            prepared.diff.text());
+    }
     log::info("Target {}{}{}.", prepared.target,
               prepared.table_identity.empty() ? "" : " (uuid " + prepared.table_identity + ")",
               prepared.created ? ", created" : "");
@@ -223,14 +227,47 @@ void Engine::check_relation(const pgoutput::TableInfo& relation) {
         log::debug("Relation {}.{} matches the target.", relation.schema, relation.name);
         return;
     }
-    throw SchemaChangeError(std::format("schema change detected on {} (Relation message)\n  differences:\n{}",
-                                        table_.qualified(), diff.text()),
-                            diff.text());
+    stop_on_schema_change("Relation message", transaction_lsn_, diff.text());
+}
+
+std::string Engine::schema_change_report(const std::string& target, std::string_view where,
+                                         std::optional<core::Lsn> stored, std::optional<core::Lsn> detected,
+                                         const std::string& diff) const {
+    const std::string& slot = config_.source.slot.value;
+    return std::format(
+        "schema change detected on {} (target {})\n"
+        "  detected at: {}{}\n"
+        "  applied and confirmed up to: {}\n"
+        "  differences:\n{}\n"
+        "  Recordflow does not handle schema changes in v1. To recover:\n"
+        "    1. stop Recordflow\n"
+        "    2. in ClickHouse: DROP VIEW {}_current; DROP TABLE {};\n"
+        "    3. in PostgreSQL: SELECT pg_replication_slot_advance('{}', pg_current_wal_lsn());\n"
+        "    4. start Recordflow (it recreates the table and runs a full snapshot)",
+        config_.source.table.value, target, where, detected ? ", LSN " + core::format_lsn(*detected) : "",
+        stored ? core::format_lsn(*stored) : "nothing stored yet", indented(diff), target, target, slot);
+}
+
+void Engine::stop_on_schema_change(std::string_view where, core::Lsn detected, const std::string& diff) {
+    // Decision 7.3: the transaction holding the change is dropped, the complete
+    // ones before it are stored and confirmed, then exit code 3.
+    if (sink_->in_transaction()) sink_->abort();
+    flush_and_checkpoint(false);
+    confirm_now();
+    throw SchemaChangeError(schema_change_report(state_.target.table, where, state_.last_flushed_lsn, detected,
+                                                 diff),
+                            diff);
+}
+
+void Engine::confirm_now() {
+    checkpoint_if_due(true);
+    repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
 }
 
 void Engine::dispatch(const pgoutput::Message& message) {
     std::visit(Overloaded{
                    [&](const pgoutput::Begin& begin) {
+                       transaction_lsn_ = begin.final_lsn;
                        assembler_.begin(begin);
                        sink_->begin();
                    },
@@ -332,16 +369,26 @@ void Engine::maybe_flush() {
 
 int Engine::stream() {
     constexpr std::chrono::milliseconds kPollInterval{200};
-    while (!repl_->ended()) {
-        if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
-        maybe_flush();
-        checkpoint_if_due();
-        repl_->maybe_send_status(std::chrono::steady_clock::now());
+    try {
+        while (!repl_->ended()) {
+            if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
+            maybe_flush();
+            checkpoint_if_due();
+            repl_->maybe_send_status(std::chrono::steady_clock::now());
+        }
+        if (sink_->in_transaction()) sink_->abort();
+        flush_and_checkpoint(false);
+    } catch (const sink::FlushSchemaChangeError& e) {
+        // Found by the converter while writing: the sink stored the complete
+        // transactions before the failing event (decision 7.3).
+        if (sink_->in_transaction()) sink_->abort();
+        if (e.stored()) advance(*e.stored(), true);
+        confirm_now();
+        throw SchemaChangeError(schema_change_report(state_.target.table, "converter (" + std::string(e.what()) + ")",
+                                                     state_.last_flushed_lsn, e.at().commit_lsn, e.diff()),
+                                e.diff());
     }
-    if (sink_->in_transaction()) sink_->abort();
-    flush_and_checkpoint(false);
-    checkpoint_if_due(true);
-    repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
+    confirm_now();
     log::info("Stream ended.");
     return 0;
 }

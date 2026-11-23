@@ -37,6 +37,10 @@ public:
     // (decision 5.7).
     ::clickhouse::Block take();
 
+    // Drops the rows added so far, e.g. after a conversion error left a
+    // partial row behind.
+    void discard();
+
 private:
     void add_upsert(const core::ChangeEvent& event);
     // `key` holds the values of `key_columns`, in the same order.
