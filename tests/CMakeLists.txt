@@ -24,12 +24,15 @@ if(RECORDFLOW_IT_SUPPORT_SOURCES)
     add_library(recordflow_it_support STATIC ${RECORDFLOW_IT_SUPPORT_SOURCES})
     target_include_directories(recordflow_it_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/integration)
     target_compile_definitions(recordflow_it_support PRIVATE
-        RECORDFLOW_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        RECORDFLOW_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+        RECORDFLOW_BINARY="$<TARGET_FILE:recordflow>")
     target_link_libraries(recordflow_it_support PUBLIC recordflow_core GTest::gtest)
 endif()
 
 if(RECORDFLOW_IT_TEST_SOURCES)
     add_executable(recordflow_integration_tests ${RECORDFLOW_IT_TEST_SOURCES})
     target_link_libraries(recordflow_integration_tests PRIVATE recordflow_it_support GTest::gtest_main)
+    # The tests start the binary as a subprocess.
+    add_dependencies(recordflow_integration_tests recordflow)
     gtest_discover_tests(recordflow_integration_tests PROPERTIES LABELS integration)
 endif()
