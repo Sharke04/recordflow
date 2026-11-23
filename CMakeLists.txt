@@ -51,6 +51,7 @@ add_library(recordflow_core
     src/pg/query_connection.cpp
     src/pg/replication_connection.cpp
     src/pgoutput/decoder.cpp
+    src/runtime/backoff.cpp
     src/runtime/log.cpp
     src/sink/clickhouse/type_mapping.cpp
     src/sink/clickhouse/value_converter.cpp
