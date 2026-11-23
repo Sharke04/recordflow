@@ -190,6 +190,32 @@ void ReplicationConnection::finish_copy() {
     }
 }
 
+void ReplicationConnection::finish(std::chrono::milliseconds timeout) {
+    if (ended_) return;
+    if (PQputCopyEnd(conn_, nullptr) < 0 || PQflush(conn_) < 0) {
+        log::warn("could not end the replication stream: {}", PQerrorMessage(conn_));
+        return;
+    }
+    // Frames already in flight come first, then the end of the stream.
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until) {
+        char* data = nullptr;
+        const int len = PQgetCopyData(conn_, &data, /*async=*/1);
+        if (len > 0) {
+            PQfreemem(data);
+            continue;
+        }
+        if (len == -1) {
+            ended_ = true;
+            while (PGresult* res = PQgetResult(conn_)) PQclear(res);
+            return;
+        }
+        if (len == -2) return;
+        pollfd fd{PQsocket(conn_), POLLIN, 0};
+        if (::poll(&fd, 1, 100) > 0 && PQconsumeInput(conn_) == 0) return;
+    }
+}
+
 void ReplicationConnection::confirm(core::Lsn lsn) {
     confirmed_ = std::max(confirmed_, lsn);
 }

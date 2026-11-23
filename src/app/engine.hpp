@@ -66,9 +66,10 @@ private:
     void retry_transient(std::string_view what, const std::function<void()>& step,
                          const std::function<void()>& on_failure = {});
 
-    // The main loop (decisions 8.5 and 9.5); returns only through exceptions
-    // until shutdown handling exists.
-    [[noreturn]] void stream();
+    // The main loop (decisions 8.5 and 9.5) until a stop signal.
+    int stream();
+    // The graceful shutdown of decision 8.4; returns exit code 0.
+    int shutdown();
     void handle_frame(const pg::CopyData& copy);
     void dispatch(const pgoutput::Message& message);
     void check_relation(const pgoutput::TableInfo& relation);

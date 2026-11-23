@@ -8,7 +8,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
 #include <variant>
 
@@ -25,6 +24,7 @@
 #include "runtime/backoff.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
+#include "runtime/signals.hpp"
 #include "sink/clickhouse/clickhouse_sink.hpp"
 #include "sink/flush_policy.hpp"
 #include "sink/jsonl/jsonl_sink.hpp"
@@ -33,6 +33,10 @@
 namespace recordflow::app {
 
 namespace {
+
+// Thrown by retry loops once a shutdown is requested; ends startup or a
+// reconnect so that the shutdown sequence can run.
+struct ShutdownRequested {};
 
 template <typename... Handlers>
 struct Overloaded : Handlers... {
@@ -88,13 +92,14 @@ void Engine::retry_transient(std::string_view what, const std::function<void()>&
                              const std::function<void()>& on_failure) {
     runtime::Backoff backoff{std::string(what), config_.retry};
     while (true) {
+        if (runtime::shutdown_requested()) throw ShutdownRequested{};
         try {
             step();
             backoff.success();
             return;
         } catch (const TransientError& e) {
             if (on_failure) on_failure();
-            std::this_thread::sleep_for(backoff.failure(e.what()));
+            if (!runtime::sleep_unless_shutdown(backoff.failure(e.what()))) throw ShutdownRequested{};
         }
     }
 }
@@ -435,10 +440,11 @@ void Engine::maybe_flush() {
     }
 }
 
-void Engine::stream() {
+int Engine::stream() {
     constexpr std::chrono::milliseconds kPollInterval{200};
     try {
-        while (true) {
+        while (!runtime::shutdown_requested()) {
+            std::optional<TransientError> lost;
             try {
                 if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
                 if (repl_->ended()) {
@@ -448,9 +454,17 @@ void Engine::stream() {
                 checkpoint_if_due();
                 repl_->maybe_send_status(std::chrono::steady_clock::now());
             } catch (const TransientError& e) {
-                recover(e);
+                lost = e;
+            }
+            if (lost && !runtime::shutdown_requested()) {
+                try {
+                    recover(*lost);
+                } catch (const ShutdownRequested&) {
+                    break;
+                }
             }
         }
+        return shutdown();
     } catch (const sink::FlushSchemaChangeError& e) {
         // Found by the converter while writing: the sink stored the complete
         // transactions before the failing event (decision 7.3).
@@ -463,9 +477,41 @@ void Engine::stream() {
     }
 }
 
+int Engine::shutdown() {
+    // Decision 8.4, within shutdown.timeout_s.
+    const std::chrono::seconds timeout{config_.shutdown.timeout_s.value};
+    runtime::arm_shutdown_deadline(timeout);
+    log::info("Shutting down (deadline {} s).", timeout.count());
+
+    // 1. The stream is no longer read. 3. The open transaction is dropped.
+    if (sink_->in_transaction()) sink_->abort();
+    // 4. One attempt to write the complete transactions; if ClickHouse is not
+    //    available they wait in the slot.
+    try {
+        flush_and_checkpoint(false);
+    } catch (const TransientError& e) {
+        log::warn("Skipping the final flush: {}", e.what());
+    }
+    // 5. State file and slot confirmation up to what is stored.
+    confirm_now();
+    // 6. End the stream and close the connections.
+    if (repl_) repl_->finish(std::chrono::seconds(2));
+    repl_.reset();
+    query_.reset();
+    sink_.reset();
+    log::info("Stopped; stored and confirmed up to {}.", core::format_lsn(state_.last_flushed_lsn));
+    return static_cast<int>(ExitCode::Ok);
+}
+
 int Engine::run() {
-    startup();
-    stream();
+    try {
+        startup();
+    } catch (const ShutdownRequested&) {
+        log::info("Stopped during startup.");
+        return static_cast<int>(ExitCode::Ok);
+    }
+    // A signal during startup is handled by the loop's first check.
+    return stream();
 }
 
 }  // namespace recordflow::app

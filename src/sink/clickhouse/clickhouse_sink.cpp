@@ -9,10 +9,10 @@
 #include <functional>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
 
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
+#include "runtime/signals.hpp"
 #include "sink/clickhouse/ddl.hpp"
 
 namespace recordflow::sink::clickhouse {
@@ -153,7 +153,10 @@ void ClickHouseSink::with_retry(const std::function<void()>& write) {
             return;
         } catch (const TransientError& e) {
             client_.ResetConnection();
-            std::this_thread::sleep_for(backoff_.failure(e.what()));
+            // While shutting down the write is skipped, not retried (decision
+            // 8.4): the data waits in the slot.
+            if (runtime::shutdown_requested()) throw;
+            if (!runtime::sleep_unless_shutdown(backoff_.failure(e.what()))) throw;
         }
     }
 }

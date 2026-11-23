@@ -40,7 +40,8 @@ public:
     // One INSERT of one Block per flush (one more per TRUNCATE in between,
     // which is applied at its position). Transient errors reset the connection
     // and retry the same Block with backoff, without a limit (decision 8.3);
-    // the stream is not read meanwhile (decision 4.6).
+    // the stream is not read meanwhile (decision 4.6). Once a shutdown is
+    // requested the TransientError is thrown instead (decision 8.4).
     std::optional<core::Lsn> flush(bool include_open = false) override;
     void sweep(core::Version below, core::Version tombstone) override;
 

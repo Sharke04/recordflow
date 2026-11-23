@@ -10,6 +10,7 @@
 #include "config/describe.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
+#include "runtime/signals.hpp"
 
 namespace {
 
@@ -73,6 +74,7 @@ int main(int argc, char** argv) {
         }
         log::info("{}", config::describe(cfg));
 
+        recordflow::runtime::install_signal_handlers();
         recordflow::app::Engine engine(std::move(cfg));
         return engine.run();
     } catch (const std::exception& e) {
