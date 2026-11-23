@@ -12,7 +12,11 @@ FlushLimits FlushLimits::from(const config::BatchSection& batch) {
 
 FlushDecision FlushPolicy::decide(const BufferStats& stats, bool in_transaction,
                                   std::chrono::steady_clock::time_point now) const {
-    if (stats.rows == 0) return FlushDecision::None;  // an empty buffer has nothing to write
+    if (stats.rows == 0) {
+        // Nothing to write, but an oversized transaction may have committed
+        // after its rows were written (decision 4.5 rule 2).
+        return !in_transaction && stats.commit_pending ? FlushDecision::Complete : FlushDecision::None;
+    }
 
     if (in_transaction) {
         const bool over_hard_limit = stats.rows >= kHardLimitFactor * limits_.max_rows ||

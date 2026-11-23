@@ -15,6 +15,9 @@ struct BufferStats {
     std::size_t bytes = 0;           // estimated
     std::size_t committed_rows = 0;  // events of complete transactions
     std::optional<std::chrono::steady_clock::time_point> oldest;  // first buffered event
+    // A Commit whose events were all written already (an oversized
+    // transaction): its position still has to be reported by a flush.
+    bool commit_pending = false;
 };
 
 // Buffers events by transaction (decisions 4.5 and 8.2): complete transactions

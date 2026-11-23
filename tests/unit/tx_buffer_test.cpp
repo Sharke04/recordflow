@@ -149,6 +149,12 @@ TEST(FlushPolicy, HardLimitForcesAWriteInsideAHugeTransaction) {
     stats.rows = 1;
     stats.bytes = 4000;
     EXPECT_EQ(policy.decide(stats, true, now), FlushDecision::Oversized);
+
+    // Everything was written before the Commit: only its position is left.
+    sink::BufferStats written;
+    written.commit_pending = true;
+    EXPECT_EQ(policy.decide(written, true, now), FlushDecision::None);
+    EXPECT_EQ(policy.decide(written, false, now), FlushDecision::Complete);
 }
 
 }  // namespace
