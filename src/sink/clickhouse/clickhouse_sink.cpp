@@ -8,6 +8,7 @@
 #include <format>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
@@ -41,7 +42,7 @@ std::vector<std::string> parse_sorting_key(std::string_view text) {
 }  // namespace
 
 ClickHouseSink::ClickHouseSink(const config::ClickHouseSection& section, const config::RetrySection& retry)
-    : section_(section), retry_(retry), client_(client_options(section)) {}
+    : section_(section), client_(client_options(section)), backoff_("ClickHouse insert", retry) {}
 
 std::string ClickHouseSink::target() const {
     return qualified_name(section_.database.value, table_);
@@ -141,8 +142,36 @@ PrepareResult ClickHouseSink::prepare(const core::TableSchema& source) {
     }
 }
 
-std::optional<core::Lsn> ClickHouseSink::flush(bool) {
-    throw std::logic_error("ClickHouseSink::flush is not implemented yet");
+void ClickHouseSink::insert(const ch::Block& block) {
+    // The write is idempotent (decision 2.2), so the same Block is retried.
+    while (true) {
+        try {
+            client_.Insert(target(), block);
+            backoff_.success();
+            return;
+        } catch (const TransientError& e) {
+            client_.ResetConnection();
+            std::this_thread::sleep_for(backoff_.failure(e.what()));
+        }
+    }
+}
+
+std::optional<core::Lsn> ClickHouseSink::flush(bool include_open) {
+    if (!rows_) throw std::logic_error("ClickHouseSink::flush before prepare");
+    TxBuffer::Drained drained = buffer_.drain(include_open);
+    for (const auto& event : drained.events) {
+        if (event.op == core::Op::Truncate) {
+            log::warn("TRUNCATE of {} at {} is not applied to ClickHouse yet.", event.table, event.version.str());
+            continue;
+        }
+        rows_->add(event);
+    }
+    if (rows_->rows() > 0) {
+        const std::size_t rows = rows_->rows();
+        insert(rows_->take());
+        log::debug("Wrote {} rows to {}.", rows, target());
+    }
+    return drained.last_commit_end;
 }
 
 void ClickHouseSink::sweep(core::Version, core::Version) {

@@ -45,7 +45,8 @@ ch::ClientOptions client_options(const config::ClickHouseSection& section) {
         .SetCompressionMethod(compression)
         .SetPingBeforeQuery(true)
         // Retries are ours (decision 8.3), not the library's blocking ones.
-        .SetSendRetries(1)
+        .SetSendRetries(0)
+        .SetRetryTimeout(std::chrono::seconds(0))
         .SetConnectionConnectTimeout(std::chrono::seconds(5))
         .SetConnectionRecvTimeout(std::chrono::seconds(60))
         .SetConnectionSendTimeout(std::chrono::seconds(60));
