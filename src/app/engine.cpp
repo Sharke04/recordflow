@@ -1,6 +1,5 @@
 #include "app/engine.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -8,9 +7,11 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 
+#include "app/startup_decision.hpp"
 #include "core/transaction_assembler.hpp"
 #include "pg/catalog.hpp"
 #include "pg/conninfo.hpp"
@@ -18,14 +19,13 @@
 #include "pg/replication_connection.hpp"
 #include "pgoutput/decoder.hpp"
 #include "pgoutput/wire.hpp"
+#include "runtime/backoff.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
 #include "sink/clickhouse/clickhouse_sink.hpp"
 #include "sink/flush_policy.hpp"
 #include "sink/jsonl/jsonl_sink.hpp"
 #include "sink/sink.hpp"
-#include "state/directory_lock.hpp"
-#include "state/state_store.hpp"
 
 namespace recordflow::app {
 
@@ -70,20 +70,19 @@ void handle_message(const pgoutput::Message& message, StreamState& state) {
 
 // A difference between the source and an existing target found at startup
 // stops before anything is written (decisions 7.3 and 7.4).
-void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema& table,
-                    const std::string& target, const std::string& slot) {
+void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema& table, const std::string& slot) {
     if (prepared.diff.empty()) return;
-    const std::string view = target.substr(0, target.size() - 1) + "_current`";
     throw SchemaChangeError(
         std::format("schema change detected on {} (target {})\n"
                     "  detected at: startup\n"
                     "  differences:\n{}\n"
                     "  Recordflow does not handle schema changes in v1. To recover:\n"
                     "    1. stop Recordflow\n"
-                    "    2. in ClickHouse: DROP VIEW {}; DROP TABLE {};\n"
+                    "    2. in ClickHouse: DROP VIEW {}_current; DROP TABLE {};\n"
                     "    3. in PostgreSQL: SELECT pg_replication_slot_advance('{}', pg_current_wal_lsn());\n"
                     "    4. start Recordflow (it recreates the table and runs a full snapshot)",
-                    table.qualified(), target, prepared.diff.text(), view, target, slot),
+                    table.qualified(), prepared.target, prepared.diff.text(), prepared.target, prepared.target,
+                    slot),
         prepared.diff.text());
 }
 
@@ -123,9 +122,150 @@ void handle_keepalive(pg::ReplicationConnection& conn, pgoutput::ByteReader& fra
     conn.maybe_send_status(std::chrono::steady_clock::now(), reply_requested);
 }
 
-int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table, StreamState& state) {
+std::string describe_columns(const core::TableSchema& table) {
+    std::string columns;
+    for (const auto& column : table.columns) {
+        columns += std::format("{}{} {}{}", columns.empty() ? "" : ", ", column.name, column.type_name,
+                               column.not_null ? " not null" : "");
+    }
+    std::string key;
+    for (const auto& name : table.primary_key) key += (key.empty() ? "" : ", ") + name;
+    return std::format("primary key ({}); columns: {}", key, columns);
+}
+
+const char* action_name(StartupAction action) {
+    switch (action) {
+        case StartupAction::Resume:        return "resume";
+        case StartupAction::ResetSnapshot: return "reset the snapshot";
+        case StartupAction::NewSnapshot:   return "new snapshot";
+        case StartupAction::Refuse:        return "refuse";
+    }
+    return "?";
+}
+
+}  // namespace
+
+Engine::Engine(config::Config config)
+    : config_(std::move(config)), store_(config_.state.data_dir.value) {}
+
+Engine::~Engine() = default;
+
+void Engine::retry_transient(std::string_view what, const std::function<void()>& step,
+                             const std::function<void()>& on_failure) {
+    runtime::Backoff backoff{std::string(what), config_.retry};
+    while (true) {
+        try {
+            step();
+            backoff.success();
+            return;
+        } catch (const TransientError& e) {
+            if (on_failure) on_failure();
+            std::this_thread::sleep_for(backoff.failure(e.what()));
+        }
+    }
+}
+
+void Engine::startup() {
+    const std::string& slot = config_.source.slot.value;
+    const std::string& publication = config_.source.publication.value;
+
+    // 1. One instance per data directory, then the stored state (decision 4.2).
+    store_.prepare_directory();
+    lock_.emplace(store_.directory());
+    const std::optional<state::State> stored = store_.load();
+
+    // 2. Connections; the databases may still be starting (decision 8.2).
+    query_ = std::make_unique<pg::QueryConnection>(
+        pg::build_connection_params(config_.source.conninfo.value, pg::ConnectionKind::Query));
+    retry_transient("PostgreSQL connection", [&] {
+        const pg::QueryResult who = query_->exec("SELECT current_user, current_setting('server_version')");
+        log::info("Query connection open as '{}' (PostgreSQL {}).", who.rows[0][0].value_or("?"),
+                  who.rows[0][1].value_or("?"));
+    });
+
+    // 3. IDENTIFY_SYSTEM on the replication connection.
+    pg::SystemIdentity identity;
+    retry_transient(
+        "PostgreSQL replication connection",
+        [&] {
+            repl_ = std::make_unique<pg::ReplicationConnection>(pg::build_connection_params(
+                config_.source.conninfo.value, pg::ConnectionKind::Replication));
+            identity = repl_->identify_system();
+        },
+        [&] { repl_.reset(); });
+    log::info("Connected to system {} (timeline {}, WAL at {}).", identity.system_id, identity.timeline,
+              core::format_lsn(identity.xlogpos));
+
+    // 4. Catalog, publication and the watermark privilege (decision 5.1).
+    retry_transient("PostgreSQL catalog", [&] {
+        table_ = pg::read_table_schema(*query_, config_.source.table.value);
+        pg::check_publication(*query_, publication, table_);
+        pg::check_watermark_privilege(*query_);
+    });
+    log::info("Source table {}: {}", table_.qualified(), describe_columns(table_));
+
+    // 5. The target; a schema difference stops before the stream opens (decision 7.3).
+    if (config_.output.sink.value == config::SinkKind::ClickHouse) {
+        sink_ = std::make_unique<sink::clickhouse::ClickHouseSink>(config_.clickhouse, config_.retry);
+    } else {
+        sink_ = std::make_unique<sink::jsonl::JsonlSink>();
+    }
+    sink::PrepareResult prepared;
+    retry_transient("ClickHouse", [&] { prepared = sink_->prepare(table_); });
+    check_prepared(prepared, table_, slot);
+    log::info("Target {}{}{}.", prepared.target,
+              prepared.table_identity.empty() ? "" : " (uuid " + prepared.table_identity + ")",
+              prepared.created ? ", created" : "");
+
+    // 6. The slot's confirmed position.
+    pg::SlotInfo slot_info;
+    retry_transient("PostgreSQL slot lookup", [&] { slot_info = pg::read_slot(*query_, slot); });
+
+    // 7. Identity checks and the snapshot decision (decisions 4.3 and 5.1).
+    StartupFacts facts;
+    facts.stored = stored;
+    facts.slot = slot;
+    facts.source_table = table_.qualified();
+    facts.target_table = prepared.target;
+    facts.system_id = identity.system_id;
+    facts.target_uuid = prepared.table_identity;
+    facts.confirmed_flush_lsn = slot_info.confirmed_flush_lsn;
+    facts.snapshot_on_start = config_.snapshot.on_start.value;
+    StartupDecision decision = decide_startup(facts);
+    if (decision.action == StartupAction::Refuse) {
+        throw InterventionError(std::format("cannot start with state file {}: {}", store_.file().string(),
+                                            decision.messages.front()));
+    }
+    for (const auto& message : decision.messages) log::warn("{}", message);
+    state_ = std::move(*decision.state);
+    store_.save(state_);
+    log::info("State {}: {}; last flushed {}, slot confirmed {}, snapshot {}.", store_.file().string(),
+              action_name(decision.action), core::format_lsn(state_.last_flushed_lsn),
+              core::format_lsn(slot_info.confirmed_flush_lsn), state::to_string(state_.snapshot.status));
+    if (state_.snapshot.status != state::SnapshotStatus::Done) {
+        log::warn("Snapshots are not implemented yet: only changes from the slot's position are streamed.");
+    }
+
+    // 8. START_REPLICATION from the last stored position (decision 8.2).
+    retry_transient(
+        "PostgreSQL replication start",
+        [&] {
+            if (!repl_) {
+                repl_ = std::make_unique<pg::ReplicationConnection>(pg::build_connection_params(
+                    config_.source.conninfo.value, pg::ConnectionKind::Replication));
+            }
+            repl_->start(slot, publication, state_.last_flushed_lsn);
+        },
+        [&] { repl_.reset(); });
+    log::info("Streaming from slot '{}' via publication '{}' at {}.", slot, publication,
+              core::format_lsn(state_.last_flushed_lsn));
+}
+
+int Engine::stream() {
+    StreamState state{core::TransactionAssembler{}, *sink_, sink::FlushPolicy(sink::FlushLimits::from(config_.batch))};
+    pg::ReplicationConnection& conn = *repl_;
     pgoutput::PgoutputDecoder decoder;
-    state.assembler.set_primary_key(table.qualified(), table.primary_key);
+    state.assembler.set_primary_key(table_.qualified(), table_.primary_key);
 
     constexpr std::chrono::milliseconds kPollInterval{200};
     while (!conn.ended()) {
@@ -161,64 +301,9 @@ int run_stream(pg::ReplicationConnection& conn, const core::TableSchema& table, 
     return 0;
 }
 
-}  // namespace
-
-Engine::Engine(config::Config config) : config_(std::move(config)) {}
-
 int Engine::run() {
-    // One instance per data directory, before anything else (decision 4.2).
-    const state::StateStore store(config_.state.data_dir.value);
-    store.prepare_directory();
-    const state::DirectoryLock lock(store.directory());
-
-    const std::string& slot = config_.source.slot.value;
-    const std::string& publication = config_.source.publication.value;
-
-    pg::QueryConnection query(pg::build_connection_params(config_.source.conninfo.value,
-                                                          pg::ConnectionKind::Query));
-    const pg::QueryResult who = query.exec("SELECT current_user, current_setting('server_version')");
-    log::info("Query connection open as '{}' (PostgreSQL {}).", who.rows[0][0].value_or("?"),
-              who.rows[0][1].value_or("?"));
-
-    const core::TableSchema table = pg::read_table_schema(query, config_.source.table.value);
-    std::string columns;
-    for (const auto& column : table.columns) {
-        columns += std::format("{}{} {}{}", columns.empty() ? "" : ", ", column.name, column.type_name,
-                               column.not_null ? " not null" : "");
-    }
-    std::string key;
-    for (const auto& name : table.primary_key) key += (key.empty() ? "" : ", ") + name;
-    log::info("Source table {}: primary key ({}); columns: {}", table.qualified(), key, columns);
-    pg::check_publication(query, publication, table);
-    pg::check_watermark_privilege(query);
-
-    // The target is checked before the stream opens (decision 7.3).
-    std::unique_ptr<sink::Sink> sink;
-    if (config_.output.sink.value == config::SinkKind::ClickHouse) {
-        auto clickhouse = std::make_unique<sink::clickhouse::ClickHouseSink>(config_.clickhouse, config_.retry);
-        const sink::PrepareResult prepared = clickhouse->prepare(table);
-        check_prepared(prepared, table, clickhouse->target(), slot);
-        log::info("ClickHouse target {} (uuid {}){}.", clickhouse->target(), prepared.table_identity,
-                  prepared.created ? ", created" : "");
-        sink = std::move(clickhouse);
-    } else {
-        sink = std::make_unique<sink::jsonl::JsonlSink>();
-        sink->prepare(table);
-        log::info("Writing JSON Lines to stdout.");
-    }
-
-    pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
-                                                               pg::ConnectionKind::Replication));
-    const pg::SystemIdentity identity = conn.identify_system();
-    log::info("Connected to system {} (timeline {}, WAL at {}); streaming from slot '{}' via publication '{}'.",
-              identity.system_id, identity.timeline, core::format_lsn(identity.xlogpos), slot, publication);
-
-    StreamState state{core::TransactionAssembler{}, *sink,
-                      sink::FlushPolicy(sink::FlushLimits::from(config_.batch))};
-
-    conn.start(slot, publication, /*start_lsn=*/0);
-    log::info("Streaming (Ctrl+C to stop)...");
-    return run_stream(conn, table, state);
+    startup();
+    return stream();
 }
 
 }  // namespace recordflow::app

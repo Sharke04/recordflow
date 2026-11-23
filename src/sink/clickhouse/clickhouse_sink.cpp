@@ -116,6 +116,7 @@ PrepareResult ClickHouseSink::prepare(const core::TableSchema& source) {
         if (!database_exists()) throw missing_database();
 
         PrepareResult result;
+        result.target = database + "." + table_;
         std::optional<ExistingTable> existing = read_table();
         if (!existing) {
             log::info("Creating ClickHouse table {} and view {}_current.", target(), table_);

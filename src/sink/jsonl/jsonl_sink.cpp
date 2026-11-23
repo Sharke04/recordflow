@@ -52,7 +52,9 @@ json row_json(const std::optional<core::Row>& row) {
 }  // namespace
 
 PrepareResult JsonlSink::prepare(const core::TableSchema&) {
-    return PrepareResult{};  // no target to create or compare
+    PrepareResult result;  // no target to create or compare
+    result.target = "stdout";
+    return result;
 }
 
 std::string JsonlSink::to_json_line(const core::ChangeEvent& event) {

@@ -126,4 +126,34 @@ void check_watermark_privilege(QueryConnection& query) {
     }
 }
 
+SlotInfo read_slot(QueryConnection& query, const std::string& slot) {
+    const QueryResult result = query.exec(
+        "SELECT slot_type, plugin, database = current_database(), confirmed_flush_lsn, wal_status, active_pid "
+        "FROM pg_replication_slots WHERE slot_name = $1",
+        {slot});
+    if (result.empty()) {
+        throw InterventionError(std::format(
+            "replication slot '{}' does not exist; Recordflow does not create slots. Create it with: "
+            "SELECT pg_create_logical_replication_slot('{}', 'pgoutput');",
+            slot, slot));
+    }
+    if (text(result, 0, 0) != "logical" || text(result, 0, 1) != "pgoutput" || text(result, 0, 2) != "t") {
+        throw InterventionError(std::format(
+            "replication slot '{}' is not a pgoutput slot of this database (type {}, plugin {})", slot,
+            text(result, 0, 0), text(result, 0, 1)));
+    }
+    if (text(result, 0, 4) == "lost") {
+        throw InterventionError(std::format(
+            "replication slot '{}' has been invalidated (required WAL was removed). Create a new slot; the next "
+            "start sees the gap and runs a full snapshot",
+            slot));
+    }
+    SlotInfo info;
+    const auto lsn = core::parse_lsn(text(result, 0, 3));
+    if (!lsn) throw InterventionError(std::format("replication slot '{}' has no confirmed position", slot));
+    info.confirmed_flush_lsn = *lsn;
+    if (!text(result, 0, 5).empty()) info.active_pid = std::stoi(text(result, 0, 5));
+    return info;
+}
+
 }  // namespace recordflow::pg
