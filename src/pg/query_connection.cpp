@@ -90,6 +90,10 @@ QueryResult QueryConnection::exec(const std::string& sql, const std::vector<Para
     return result;
 }
 
+void QueryConnection::emit_watermark(const Watermark& mark) {
+    exec("SELECT pg_logical_emit_message(true, $1, $2)", {std::string(kWatermarkPrefix), format_watermark(mark)});
+}
+
 std::string QueryConnection::escape_identifier(const std::string& name) {
     ensure_connected();
     char* escaped = PQescapeIdentifier(conn_, name.c_str(), name.size());
