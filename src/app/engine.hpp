@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -7,11 +8,17 @@
 
 #include "config/config.hpp"
 #include "core/table_schema.hpp"
+#include "core/transaction_assembler.hpp"
+#include "core/version.hpp"
+#include "pgoutput/decoder.hpp"
+#include "pgoutput/messages.hpp"
+#include "sink/flush_policy.hpp"
 #include "state/directory_lock.hpp"
 #include "state/state.hpp"
 #include "state/state_store.hpp"
 
 namespace recordflow::pg {
+class CopyData;
 class QueryConnection;
 class ReplicationConnection;
 }  // namespace recordflow::pg
@@ -35,6 +42,10 @@ public:
     // runtime/errors.hpp.
     int run();
 
+    // Position-only checkpoints (keepalives, transactions without rows for
+    // the table) are written at most this often.
+    static constexpr std::chrono::seconds kPositionCheckpointInterval{1};
+
 private:
     // Decisions 5.1 and 8.2: lock and state, connections (with backoff while
     // the databases are unreachable), IDENTIFY_SYSTEM, catalog, publication and
@@ -47,7 +58,21 @@ private:
     void retry_transient(std::string_view what, const std::function<void()>& step,
                          const std::function<void()>& on_failure = {});
 
+    // The main loop (decisions 8.5 and 9.5).
     int stream();
+    void handle_frame(const pg::CopyData& copy);
+    void dispatch(const pgoutput::Message& message);
+    void check_relation(const pgoutput::TableInfo& relation);
+    bool tracked(const core::ChangeEvent& event) const;
+
+    // Flushes when the batch policy says so (decision 4.5).
+    void maybe_flush();
+    // flush -> state file -> slot confirmation (decision 4.2).
+    void flush_and_checkpoint(bool include_open);
+    // Records that everything up to `lsn` is stored. Written to the state
+    // file and confirmed at once if `now`, otherwise within the interval.
+    void advance(core::Lsn lsn, bool now);
+    void checkpoint_if_due(bool force = false);
 
     config::Config config_;
     state::StateStore store_;
@@ -57,6 +82,12 @@ private:
     std::unique_ptr<pg::QueryConnection> query_;
     std::unique_ptr<pg::ReplicationConnection> repl_;
     std::unique_ptr<sink::Sink> sink_;
+    pgoutput::PgoutputDecoder decoder_;
+    core::TransactionAssembler assembler_;
+    sink::FlushPolicy policy_;
+
+    core::Lsn stored_lsn_ = 0;  // highest position known to be stored, maybe not yet in the state file
+    std::chrono::steady_clock::time_point last_checkpoint_{};
 };
 
 }  // namespace recordflow::app
