@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +37,12 @@ public:
 
     // Drops remembered xids that precede `xmin` (in wraparound order).
     void forget_xids_before(Xid xmin);
+    void forget_all_xids() { recent_xids_.clear(); }
+
+    // The xid of the transaction being decoded, if any.
+    std::optional<Xid> open_xid() const {
+        return in_transaction_ ? std::optional<Xid>(current_.xid) : std::nullopt;
+    }
 
     // Forgets the open transaction (after a lost connection).
     void reset();

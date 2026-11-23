@@ -84,7 +84,8 @@ const char* action_name(StartupAction action) {
 Engine::Engine(config::Config config)
     : config_(std::move(config)),
       store_(config_.state.data_dir.value),
-      policy_(sink::FlushLimits::from(config_.batch)) {}
+      policy_(sink::FlushLimits::from(config_.batch)),
+      chunk_backoff_("PostgreSQL snapshot query", config_.retry) {}
 
 Engine::~Engine() = default;
 
@@ -191,12 +192,81 @@ void Engine::startup() {
     log::info("State {}: {}; last flushed {}, slot confirmed {}, snapshot {}.", store_.file().string(),
               action_name(decision.action), core::format_lsn(state_.last_flushed_lsn),
               core::format_lsn(slot_info.confirmed_flush_lsn), state::to_string(state_.snapshot.status));
-    if (state_.snapshot.status != state::SnapshotStatus::Done) {
-        log::warn("Snapshots are not implemented yet: only changes from the slot's position are streamed.");
-    }
+    start_snapshot();
 
     // 8. START_REPLICATION from the last stored position (decision 8.2).
     start_replication();
+}
+
+void Engine::start_snapshot() {
+    if (state_.snapshot.status == state::SnapshotStatus::Done) {
+        log::info("Snapshot already done; snapshot_on_start = if_incomplete, so none runs.");
+        return;
+    }
+    snapshot::RunnerSettings settings;
+    settings.slot = config_.source.slot.value;
+    settings.chunk_size = static_cast<std::size_t>(config_.snapshot.chunk_size.value);
+    settings.chunk_delay = std::chrono::milliseconds(config_.snapshot.chunk_delay_ms.value);
+    settings.window_timeout = std::chrono::seconds(config_.snapshot.window_timeout_s.value);
+    snapshot_.emplace(table_, settings);
+    snapshot_->start(state_.snapshot);
+    // A new snapshot is running from now on (decision 5.1, step 3).
+    if (state_.snapshot != snapshot_->progress()) {
+        state_.snapshot = snapshot_->progress();
+        store_.save(state_);
+    }
+}
+
+void Engine::open_chunk(std::chrono::steady_clock::time_point now) {
+    try {
+        // The stream is not read meanwhile (decision 5.2, step 1).
+        snapshot_->open_window(*query_, assembler_.recent_xids(), assembler_.open_xid(), now);
+        chunk_backoff_.success();
+    } catch (const TransientError& e) {
+        if (e.resource() != Resource::PostgresQuery) throw;
+        // Decision 8.2: the chunk is read again once the query connection is back.
+        query_->reset();
+        next_chunk_after_ = now + chunk_backoff_.failure(e.what());
+        return;
+    } catch (const SchemaChangeError& e) {
+        stop_on_schema_change("chunk SELECT", std::nullopt, e.diff());
+    }
+    if (const auto horizon = snapshot_->xid_horizon()) assembler_.forget_xids_before(*horizon);
+}
+
+void Engine::snapshot_step() {
+    if (!snapshot_) return;
+    const auto now = std::chrono::steady_clock::now();
+    snapshot_->on_tick(now);
+    if (snapshot_->ready_for_chunk(now) && now >= next_chunk_after_) open_chunk(now);
+    if (snapshot_->status() == snapshot::PassStatus::Complete) finish_snapshot();
+}
+
+void Engine::finish_snapshot() {
+    // The last chunk's rows and progress are stored first (decision 5.5, step 1).
+    flush_and_checkpoint(false);
+    confirm_now();
+    snapshot_->finish();
+    pending_progress_.reset();
+    state_.snapshot = snapshot_->progress();
+    store_.save(state_);
+    log::info("Snapshot of {} done (rows up to {}).", table_.qualified(),
+              core::format_lsn(state_.snapshot.version_lsn.value_or(0)));
+    snapshot_.reset();
+}
+
+void Engine::on_commit(const pgoutput::Commit& commit) {
+    assembler_.commit(commit);
+    sink_->commit(commit.end_lsn);
+    if (!snapshot_) return;
+    auto accepted = snapshot_->on_commit({commit.commit_lsn, commit.commit_ts}, std::chrono::steady_clock::now());
+    if (!accepted) return;
+    // The chunk rows as a pseudo-transaction right after the H transaction
+    // (decision 9.2, step 5).
+    sink_->begin();
+    for (const auto& event : accepted->rows) sink_->append(event);
+    sink_->commit(commit.end_lsn);
+    pending_progress_ = PendingProgress{std::move(accepted->progress), commit.end_lsn};
 }
 
 void Engine::start_replication() {
@@ -265,7 +335,9 @@ void Engine::recover(const TransientError& error) {
     // Decision 8.2: only the open transaction is dropped; the new session
     // resends it, together with its Relation messages.
     if (sink_->in_transaction()) sink_->abort();
+    if (snapshot_) snapshot_->abort_window("lost replication connection");
     assembler_.reset();
+    assembler_.forget_all_xids();
     decoder_.reset();
     repl_.reset();
     // Complete transactions are written first; if ClickHouse was the reason
@@ -301,6 +373,18 @@ void Engine::check_relation(const pgoutput::TableInfo& relation) {
     stop_on_schema_change("Relation message", transaction_lsn_, diff.text());
 }
 
+bool Engine::tracked_change(const core::ChangeEvent& event) {
+    if (!tracked(event)) return false;
+    if (snapshot_) {
+        if (event.op == core::Op::Truncate) {
+            snapshot_->on_truncate(event);
+        } else {
+            snapshot_->on_change(event);
+        }
+    }
+    return true;
+}
+
 std::string Engine::schema_change_report(const std::string& target, std::string_view where,
                                          std::optional<core::Lsn> stored, std::optional<core::Lsn> detected,
                                          const std::string& diff) const {
@@ -319,10 +403,12 @@ std::string Engine::schema_change_report(const std::string& target, std::string_
         stored ? core::format_lsn(*stored) : "nothing stored yet", indented(diff), target, target, slot);
 }
 
-void Engine::stop_on_schema_change(std::string_view where, core::Lsn detected, const std::string& diff) {
+void Engine::stop_on_schema_change(std::string_view where, std::optional<core::Lsn> detected,
+                                   const std::string& diff) {
     // Decision 7.3: the transaction holding the change is dropped, the complete
     // ones before it are stored and confirmed, then exit code 3.
     if (sink_->in_transaction()) sink_->abort();
+    if (snapshot_) snapshot_->abort_window("schema change");
     flush_and_checkpoint(false);
     confirm_now();
     throw SchemaChangeError(schema_change_report(state_.target.table, where, state_.last_flushed_lsn, detected,
@@ -342,20 +428,17 @@ void Engine::dispatch(const pgoutput::Message& message) {
                        assembler_.begin(begin);
                        sink_->begin();
                    },
-                   [&](const pgoutput::Commit& commit) {
-                       assembler_.commit(commit);
-                       sink_->commit(commit.end_lsn);
-                   },
+                   [&](const pgoutput::Commit& commit) { on_commit(commit); },
                    // Before any change of the same transaction (decision 7.2).
                    [&](const pgoutput::Relation& relation) { check_relation(*relation.table); },
                    [&](const pgoutput::Change& change) {
                        // Other tables of the publication are skipped (decision 4.4).
                        core::ChangeEvent event = assembler_.change(change);
-                       if (tracked(event)) sink_->append(event);
+                       if (tracked_change(event)) sink_->append(event);
                    },
                    [&](const pgoutput::Truncate& truncate) {
                        for (const auto& event : assembler_.truncate(truncate)) {
-                           if (tracked(event)) sink_->append(event);
+                           if (tracked_change(event)) sink_->append(event);
                        }
                    },
                    // Logical messages never reach the sink; Recordflow's own
@@ -364,6 +447,7 @@ void Engine::dispatch(const pgoutput::Message& message) {
                        if (logical.prefix == pg::kWatermarkPrefix) {
                            log::debug("Watermark '{}' at {} (commit {})", logical.content,
                                       core::format_lsn(logical.lsn), core::format_lsn(transaction_lsn_));
+                           if (snapshot_) snapshot_->on_message(logical, transaction_lsn_);
                            return;
                        }
                        log::debug("Logical message '{}' at {}", logical.prefix, core::format_lsn(logical.lsn));
@@ -409,6 +493,11 @@ void Engine::checkpoint_if_due(bool force) {
     // The state file first, then the slot (decision 4.2): a crash in between
     // only replays what is already stored.
     state_.last_flushed_lsn = stored_lsn_;
+    if (pending_progress_ && stored_lsn_ >= pending_progress_->commit_end) {
+        // The chunk's rows are stored, so its progress may be too.
+        state_.snapshot = std::move(pending_progress_->progress);
+        pending_progress_.reset();
+    }
     store_.save(state_);
     last_checkpoint_ = now;
     if (repl_) {
@@ -458,6 +547,7 @@ int Engine::stream() {
                     throw TransientError(Resource::PostgresReplication, "the server ended the replication stream");
                 }
                 maybe_flush();
+                snapshot_step();
                 checkpoint_if_due();
                 repl_->maybe_send_status(std::chrono::steady_clock::now());
             } catch (const TransientError& e) {
@@ -490,7 +580,10 @@ int Engine::shutdown() {
     runtime::arm_shutdown_deadline(timeout);
     log::info("Shutting down (deadline {} s).", timeout.count());
 
-    // 1. The stream is no longer read. 3. The open transaction is dropped.
+    // 1. The stream is no longer read. 2. An open window is dropped; the
+    //    chunk is read again after the next start. 3. The open transaction
+    //    is dropped.
+    if (snapshot_) snapshot_->abort_window("shutdown");
     if (sink_->in_transaction()) sink_->abort();
     // 4. One attempt to write the complete transactions; if ClickHouse is not
     //    available they wait in the slot.
