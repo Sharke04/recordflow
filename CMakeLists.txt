@@ -55,6 +55,7 @@ add_library(recordflow_core
     src/runtime/backoff.cpp
     src/runtime/log.cpp
     src/runtime/signals.cpp
+    src/snapshot/chunk_window.cpp
     src/sink/clickhouse/clickhouse_sink.cpp
     src/sink/clickhouse/client.cpp
     src/sink/clickhouse/ddl.cpp
