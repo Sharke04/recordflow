@@ -60,8 +60,9 @@ public:
     virtual std::optional<core::Lsn> flush(bool include_open = false) = 0;
 
     // Marks every row whose latest version is below `below` as deleted with
-    // version `tombstone` (decision 5.5).
-    virtual void sweep(core::Version below, core::Version tombstone) = 0;
+    // version `tombstone` and commit time `commit_ts` (decision 5.5).
+    // Idempotent: rows already deleted are not touched again.
+    virtual void sweep(core::Version below, core::Version tombstone, std::int64_t commit_ts) = 0;
 };
 
 }  // namespace recordflow::sink

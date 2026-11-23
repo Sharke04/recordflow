@@ -43,7 +43,10 @@ public:
     // the stream is not read meanwhile (decision 4.6). Once a shutdown is
     // requested the TransientError is thrown instead (decision 8.4).
     std::optional<core::Lsn> flush(bool include_open = false) override;
-    void sweep(core::Version below, core::Version tombstone) override;
+    // One INSERT ... SELECT ... FINAL on the server (decision 5.5): every key
+    // whose latest version is below `below` and not deleted gets a deletion
+    // with version `tombstone`, _rf_source 'snapshot'. Retried like a flush.
+    void sweep(core::Version below, core::Version tombstone, std::int64_t commit_ts) override;
 
     // "`recordflow`.`public__orders`"
     std::string target() const;

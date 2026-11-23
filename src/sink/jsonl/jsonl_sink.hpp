@@ -28,7 +28,7 @@ public:
     std::optional<core::Lsn> flush(bool include_open = false) override;
 
     // Nothing to sweep in a stream of lines.
-    void sweep(core::Version, core::Version) override {}
+    void sweep(core::Version, core::Version, std::int64_t) override {}
 
     // One event as a JSON object on a single line (no trailing newline).
     static std::string to_json_line(const core::ChangeEvent& event);
