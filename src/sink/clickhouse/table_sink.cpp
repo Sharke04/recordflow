@@ -94,6 +94,53 @@ void TableSink::add_upsert(const core::ChangeEvent& event) {
     add_meta(event, event.op, false);
 }
 
+void TableSink::add_delete(const core::ChangeEvent& event, const std::vector<std::string>& key) {
+    if (key.size() != event.key_columns.size() || key.empty()) {
+        throw std::logic_error(std::format("{} delete at {} without its key", table_, event.version.str()));
+    }
+    for (auto& column : columns_) {
+        const auto it = std::find(event.key_columns.begin(), event.key_columns.end(), column.name());
+        if (it == event.key_columns.end()) {
+            column.append_default();
+        } else {
+            const auto index = static_cast<std::size_t>(it - event.key_columns.begin());
+            column.append(core::Value{core::Value::Kind::Text, key[index]});
+        }
+    }
+    add_meta(event, core::Op::Delete, true);
+}
+
+void TableSink::add(const core::ChangeEvent& event) {
+    switch (event.op) {
+        case core::Op::Insert:
+        case core::Op::Read:
+            add_upsert(event);
+            return;
+        case core::Op::Update: {
+            // With REPLICA IDENTITY DEFAULT pgoutput sends the old key only
+            // when it changed; with FULL the old row comes every time.
+            if (event.before) {
+                std::vector<std::string> old_key;
+                for (const auto& name : event.key_columns) {
+                    const core::Value* value = find(*event.before, name, 0);
+                    if (value == nullptr || value->kind != core::Value::Kind::Text) break;
+                    old_key.push_back(value->text);
+                }
+                if (old_key.size() == event.key_columns.size() && old_key != event.key) add_delete(event, old_key);
+            }
+            add_upsert(event);
+            return;
+        }
+        case core::Op::Delete:
+            add_delete(event, event.key);
+            return;
+        case core::Op::Truncate:
+        case core::Op::Unknown:
+            break;
+    }
+    throw std::logic_error(std::format("{}: event at {} is not a row change", table_, event.version.str()));
+}
+
 ch::Block TableSink::take() {
     ch::Block block;
     for (auto& column : columns_) block.AppendColumn(column.name(), column.take());
