@@ -21,7 +21,8 @@ services:
       - recordflow_pg_data:/var/lib/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      # TCP, so the temporary server that runs the init scripts does not count.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -46,11 +47,42 @@ services:
       - recordflow_ch_data:/var/lib/clickhouse
       - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
+      # As recordflow, so the check passes only after the init script created it.
+      test: ["CMD-SHELL", "clickhouse-client --user recordflow --password \"$${RECORDFLOW_CH_PASSWORD}\" --query 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 20
 
+  recordflow:
+    build: .
+    image: recordflow:local
+    container_name: recordflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      RECORDFLOW_SOURCE_CONNINFO: host=postgres port=5432 dbname=${POSTGRES_DB:-mydb} user=recordflow application_name=recordflow
+      RECORDFLOW_SOURCE_SLOT: ${RECORDFLOW_SOURCE_SLOT:-recordflow_slot}
+      RECORDFLOW_SOURCE_PUBLICATION: ${RECORDFLOW_SOURCE_PUBLICATION:-recordflow_pub}
+      RECORDFLOW_SOURCE_TABLE: ${RECORDFLOW_SOURCE_TABLE:-public.orders}
+      PGPASSWORD: ${RECORDFLOW_PG_PASSWORD:?set RECORDFLOW_PG_PASSWORD in .env (see .env.example)}
+      RECORDFLOW_CLICKHOUSE_HOST: clickhouse
+      RECORDFLOW_CLICKHOUSE_PASSWORD: ${RECORDFLOW_CH_PASSWORD:?set RECORDFLOW_CH_PASSWORD in .env (see .env.example)}
+      # The vcpkg clickhouse-cpp build cannot checksum compressed blocks.
+      RECORDFLOW_CLICKHOUSE_COMPRESSION: none
+      RECORDFLOW_SNAPSHOT_ON_START: ${RECORDFLOW_SNAPSHOT_ON_START:-always}
+      RECORDFLOW_LOG_LEVEL: ${RECORDFLOW_LOG_LEVEL:-info}
+      RECORDFLOW_SHUTDOWN_TIMEOUT_S: 8
+    volumes:
+      - recordflow_data:/var/lib/recordflow
+    # Longer than shutdown.timeout_s, so Docker never kills a clean shutdown.
+    stop_grace_period: 10s
+    # Exit codes 2-4 need an operator; on-failure gives up after 5 attempts.
+    restart: on-failure:5
+
 volumes:
   recordflow_pg_data:
   recordflow_ch_data:
+  recordflow_data:
