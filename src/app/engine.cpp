@@ -190,18 +190,51 @@ void Engine::startup() {
     }
 
     // 8. START_REPLICATION from the last stored position (decision 8.2).
+    start_replication();
+}
+
+void Engine::start_replication() {
+    const std::string& slot = config_.source.slot.value;
+    const std::string& publication = config_.source.publication.value;
     retry_transient(
-        "PostgreSQL replication start",
+        "PostgreSQL replication",
         [&] {
             if (!repl_) {
                 repl_ = std::make_unique<pg::ReplicationConnection>(pg::build_connection_params(
                     config_.source.conninfo.value, pg::ConnectionKind::Replication));
+                // After a physical failover the system_id stays the same; another
+                // one is another cluster (decision 4.3).
+                const pg::SystemIdentity identity = repl_->identify_system();
+                if (identity.system_id != state_.source.system_id) {
+                    throw InterventionError(std::format(
+                        "the source is now another PostgreSQL cluster (system_id {}, the state file has {}); "
+                        "stopping. Drop the ClickHouse table {} and its _current view and remove the state file "
+                        "to start over with a full snapshot",
+                        identity.system_id, state_.source.system_id, state_.target.table));
+                }
             }
+            // The server starts at the later of this and the slot's position.
             repl_->start(slot, publication, state_.last_flushed_lsn);
         },
         [&] { repl_.reset(); });
+    repl_->confirm(state_.last_flushed_lsn);
     log::info("Streaming from slot '{}' via publication '{}' at {}.", slot, publication,
               core::format_lsn(state_.last_flushed_lsn));
+}
+
+void Engine::recover(const TransientError& error) {
+    log::warn("{}; reconnecting.", error.what());
+    // Decision 8.2: only the open transaction is dropped; the new session
+    // resends it, together with its Relation messages.
+    if (sink_->in_transaction()) sink_->abort();
+    assembler_.reset();
+    decoder_.reset();
+    repl_.reset();
+    // Complete transactions are written first; if ClickHouse was the reason
+    // the stream stalled, this waits for it before the stream is reopened.
+    flush_and_checkpoint(false);
+    checkpoint_if_due(true);
+    start_replication();
 }
 
 bool Engine::tracked(const core::ChangeEvent& event) const {
@@ -261,7 +294,7 @@ void Engine::stop_on_schema_change(std::string_view where, core::Lsn detected, c
 
 void Engine::confirm_now() {
     checkpoint_if_due(true);
-    repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
+    if (repl_) repl_->maybe_send_status(std::chrono::steady_clock::now(), true);
 }
 
 void Engine::dispatch(const pgoutput::Message& message) {
@@ -333,8 +366,10 @@ void Engine::checkpoint_if_due(bool force) {
     state_.last_flushed_lsn = stored_lsn_;
     store_.save(state_);
     last_checkpoint_ = now;
-    repl_->confirm(stored_lsn_);
-    repl_->maybe_send_status(now);
+    if (repl_) {
+        repl_->confirm(stored_lsn_);
+        repl_->maybe_send_status(now);
+    }
 }
 
 void Engine::flush_and_checkpoint(bool include_open) {
@@ -367,17 +402,22 @@ void Engine::maybe_flush() {
     }
 }
 
-int Engine::stream() {
+void Engine::stream() {
     constexpr std::chrono::milliseconds kPollInterval{200};
     try {
-        while (!repl_->ended()) {
-            if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
-            maybe_flush();
-            checkpoint_if_due();
-            repl_->maybe_send_status(std::chrono::steady_clock::now());
+        while (true) {
+            try {
+                if (const auto copy = repl_->poll(kPollInterval)) handle_frame(*copy);
+                if (repl_->ended()) {
+                    throw TransientError(Resource::PostgresReplication, "the server ended the replication stream");
+                }
+                maybe_flush();
+                checkpoint_if_due();
+                repl_->maybe_send_status(std::chrono::steady_clock::now());
+            } catch (const TransientError& e) {
+                recover(e);
+            }
         }
-        if (sink_->in_transaction()) sink_->abort();
-        flush_and_checkpoint(false);
     } catch (const sink::FlushSchemaChangeError& e) {
         // Found by the converter while writing: the sink stored the complete
         // transactions before the failing event (decision 7.3).
@@ -388,14 +428,11 @@ int Engine::stream() {
                                                      state_.last_flushed_lsn, e.at().commit_lsn, e.diff()),
                                 e.diff());
     }
-    confirm_now();
-    log::info("Stream ended.");
-    return 0;
 }
 
 int Engine::run() {
     startup();
-    return stream();
+    stream();
 }
 
 }  // namespace recordflow::app
