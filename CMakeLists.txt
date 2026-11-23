@@ -56,6 +56,7 @@ add_library(recordflow_core
     src/sink/clickhouse/clickhouse_sink.cpp
     src/sink/clickhouse/client.cpp
     src/sink/clickhouse/ddl.cpp
+    src/sink/clickhouse/table_sink.cpp
     src/sink/clickhouse/type_mapping.cpp
     src/sink/clickhouse/value_converter.cpp
     src/sink/flush_policy.cpp
