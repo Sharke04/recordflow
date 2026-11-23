@@ -10,6 +10,7 @@
 #include "pg/conninfo.hpp"
 
 struct pg_conn;
+struct pg_result;
 
 namespace recordflow::pg {
 
@@ -61,6 +62,9 @@ public:
     // Returns the next frame if one arrives within `timeout`, otherwise
     // std::nullopt (also when a signal interrupted the wait or the server ended
     // the stream; see ended()). Never blocks longer than `timeout`.
+    // Throws InterventionError once the server reports that a publication no
+    // longer exists: since PostgreSQL 18 it only warns and skips the changes
+    // (decision 8.6).
     std::optional<CopyData> poll(std::chrono::milliseconds timeout);
 
     // True once the server has ended the COPY stream.
@@ -84,9 +88,12 @@ private:
     std::string escape_literal(const std::string& text);
 
     void send_status(std::chrono::steady_clock::time_point now);
+    static void on_notice(void* self, const pg_result* notice);
+    void check_notices();
 
     pg_conn* conn_ = nullptr;
     bool ended_ = false;
+    std::optional<std::string> missing_publication_;  // the server's warning text
     core::Lsn confirmed_ = 0;
     core::Lsn last_sent_ = 0;
     std::chrono::steady_clock::time_point last_sent_at_{};

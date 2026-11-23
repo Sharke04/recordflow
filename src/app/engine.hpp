@@ -56,6 +56,7 @@ private:
     // Connects (with backoff), checks the system_id against the state file and
     // starts replication from last_flushed_lsn (decision 8.2).
     void start_replication();
+    void connect_and_start(const std::string& slot, const std::string& publication);
     // A lost replication connection (decision 8.2): drop the open transaction,
     // reset the decoder, write the complete transactions, reconnect.
     void recover(const TransientError& error);

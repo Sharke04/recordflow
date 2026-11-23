@@ -17,6 +17,7 @@
 #include "core/transaction_assembler.hpp"
 #include "pg/catalog.hpp"
 #include "pg/conninfo.hpp"
+#include "pg/errors.hpp"
 #include "pg/query_connection.hpp"
 #include "pg/replication_connection.hpp"
 #include "pgoutput/decoder.hpp"
@@ -196,30 +197,62 @@ void Engine::startup() {
 void Engine::start_replication() {
     const std::string& slot = config_.source.slot.value;
     const std::string& publication = config_.source.publication.value;
+    const std::chrono::seconds busy_timeout{config_.retry.slot_busy_timeout_s.value};
+    std::optional<std::chrono::steady_clock::time_point> busy_since;
     retry_transient(
         "PostgreSQL replication",
         [&] {
-            if (!repl_) {
-                repl_ = std::make_unique<pg::ReplicationConnection>(pg::build_connection_params(
-                    config_.source.conninfo.value, pg::ConnectionKind::Replication));
-                // After a physical failover the system_id stays the same; another
-                // one is another cluster (decision 4.3).
-                const pg::SystemIdentity identity = repl_->identify_system();
-                if (identity.system_id != state_.source.system_id) {
-                    throw InterventionError(std::format(
-                        "the source is now another PostgreSQL cluster (system_id {}, the state file has {}); "
-                        "stopping. Drop the ClickHouse table {} and its _current view and remove the state file "
-                        "to start over with a full snapshot",
-                        identity.system_id, state_.source.system_id, state_.target.table));
+            try {
+                connect_and_start(slot, publication);
+            } catch (const pg::SlotBusyError&) {
+                // After our own lost connection the old walsender may hold the
+                // slot until wal_sender_timeout; past the limit it is someone
+                // else (decision 8.1).
+                const auto now = std::chrono::steady_clock::now();
+                if (!busy_since) busy_since = now;
+                if (now - *busy_since < busy_timeout) throw;
+                std::string holder;
+                try {
+                    holder = pg::describe_slot_holder(*query_, slot);
+                } catch (const std::exception& lookup) {
+                    holder = std::string("holder unknown: ") + lookup.what();
                 }
+                throw InterventionError(std::format(
+                    "replication slot '{}' is still in use after {} s ({}). Another Recordflow instance or "
+                    "another client is streaming from it; stop it or give this instance its own slot",
+                    slot, busy_timeout.count(), holder));
             }
-            // The server starts at the later of this and the slot's position.
-            repl_->start(slot, publication, state_.last_flushed_lsn);
         },
         [&] { repl_.reset(); });
     repl_->confirm(state_.last_flushed_lsn);
     log::info("Streaming from slot '{}' via publication '{}' at {}.", slot, publication,
               core::format_lsn(state_.last_flushed_lsn));
+}
+
+void Engine::connect_and_start(const std::string& slot, const std::string& publication) {
+    if (!repl_) {
+        repl_ = std::make_unique<pg::ReplicationConnection>(
+            pg::build_connection_params(config_.source.conninfo.value, pg::ConnectionKind::Replication));
+        // After a physical failover the system_id stays the same; another one
+        // is another cluster (decision 4.3).
+        const pg::SystemIdentity identity = repl_->identify_system();
+        if (identity.system_id != state_.source.system_id) {
+            throw InterventionError(std::format(
+                "the source is now another PostgreSQL cluster (system_id {}, the state file has {}); stopping. "
+                "Drop the ClickHouse table {} and its _current view and remove the state file to start over "
+                "with a full snapshot",
+                identity.system_id, state_.source.system_id, state_.target.table));
+        }
+    }
+    try {
+        // The server starts at the later of this and the slot's position.
+        repl_->start(slot, publication, state_.last_flushed_lsn);
+    } catch (const InterventionError& e) {
+        // A missing or invalidated slot or a dropped publication (decision 8.6).
+        throw InterventionError(std::format(
+            "{}. If the slot is gone, create a new one; the next start sees the gap and runs a full snapshot",
+            e.what()));
+    }
 }
 
 void Engine::recover(const TransientError& error) {

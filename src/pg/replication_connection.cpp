@@ -61,6 +61,32 @@ ReplicationConnection::ReplicationConnection(const KeyValues& params) : conn_(co
             throw;
         }
     }
+    PQsetNoticeReceiver(conn_, &ReplicationConnection::on_notice, this);
+}
+
+void ReplicationConnection::on_notice(void* self, const PGresult* notice) {
+    auto* connection = static_cast<ReplicationConnection*>(self);
+    std::string message = PQresultErrorField(notice, PG_DIAG_MESSAGE_PRIMARY) != nullptr
+                              ? PQresultErrorField(notice, PG_DIAG_MESSAGE_PRIMARY)
+                              : PQresultErrorMessage(notice);
+    // "skipped loading publication ..." (PostgreSQL 18+): the publication was
+    // dropped and the server no longer sends the table's changes.
+    if (message.starts_with("skipped loading publication")) {
+        connection->missing_publication_ = message;
+        return;
+    }
+    while (!message.empty() && message.back() == '\n') message.pop_back();
+    log::warn("PostgreSQL replication: {}", message);
+}
+
+void ReplicationConnection::check_notices() {
+    if (missing_publication_) {
+        throw InterventionError(std::format(
+            "the server reports \"{}\": the publication was dropped or no longer exists, so changes are not "
+            "sent anymore. Recreate it (it must include the table); changes made meanwhile are missing, so then "
+            "drop the ClickHouse table and its _current view and start Recordflow for a full snapshot",
+            *missing_publication_));
+    }
 }
 
 ReplicationConnection::~ReplicationConnection() {
@@ -127,6 +153,7 @@ std::optional<CopyData> ReplicationConnection::poll(std::chrono::milliseconds ti
     for (bool waited = false;; waited = true) {
         char* data = nullptr;
         const int len = PQgetCopyData(conn_, &data, /*async=*/1);
+        check_notices();  // before anything after the warning is processed
         if (len > 0) return CopyData(data, static_cast<std::size_t>(len));
         if (len == -1) {
             ended_ = true;
