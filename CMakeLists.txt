@@ -62,6 +62,7 @@ add_library(recordflow_core
     src/sink/flush_policy.cpp
     src/sink/jsonl/jsonl_sink.cpp
     src/sink/tx_buffer.cpp
+    src/state/directory_lock.cpp
     src/state/state.cpp
     src/state/state_store.cpp)
 
