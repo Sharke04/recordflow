@@ -46,6 +46,9 @@ std::string quote_identifier(std::string_view name);
 // clickhouse.table if set, otherwise "<schema>__<table>".
 std::string target_table_name(const config::ClickHouseSection& section, const core::TableSchema& source);
 
+// 'text' with backslashes and single quotes escaped.
+std::string quote_string(std::string_view text);
+
 // "`db`.`table`"
 std::string qualified_name(std::string_view database, std::string_view table);
 

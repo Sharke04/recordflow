@@ -19,6 +19,7 @@
 #include "pgoutput/wire.hpp"
 #include "runtime/errors.hpp"
 #include "runtime/log.hpp"
+#include "sink/clickhouse/clickhouse_sink.hpp"
 #include "sink/flush_policy.hpp"
 #include "sink/jsonl/jsonl_sink.hpp"
 #include "sink/sink.hpp"
@@ -62,6 +63,25 @@ void handle_message(const pgoutput::Message& message, StreamState& state) {
                    [&](const pgoutput::Other& other) { log::debug("Ignoring message type '{}'", other.type); },
                },
                message);
+}
+
+// A difference between the source and an existing target found at startup
+// stops before anything is written (decisions 7.3 and 7.4).
+void check_prepared(const sink::PrepareResult& prepared, const core::TableSchema& table,
+                    const std::string& target, const std::string& slot) {
+    if (prepared.diff.empty()) return;
+    const std::string view = target.substr(0, target.size() - 1) + "_current`";
+    throw SchemaChangeError(
+        std::format("schema change detected on {} (target {})\n"
+                    "  detected at: startup\n"
+                    "  differences:\n{}\n"
+                    "  Recordflow does not handle schema changes in v1. To recover:\n"
+                    "    1. stop Recordflow\n"
+                    "    2. in ClickHouse: DROP VIEW {}; DROP TABLE {};\n"
+                    "    3. in PostgreSQL: SELECT pg_replication_slot_advance('{}', pg_current_wal_lsn());\n"
+                    "    4. start Recordflow (it recreates the table and runs a full snapshot)",
+                    table.qualified(), target, prepared.diff.text(), view, target, slot),
+        prepared.diff.text());
 }
 
 // Writes the buffer and confirms what is stored: the slot moves only after a
@@ -158,15 +178,21 @@ int Engine::run() {
     pg::check_publication(query, publication, table);
     pg::check_watermark_privilege(query);
 
+    if (config_.output.sink.value == config::SinkKind::ClickHouse) {
+        sink::clickhouse::ClickHouseSink clickhouse(config_.clickhouse, config_.retry);
+        const sink::PrepareResult prepared = clickhouse.prepare(table);
+        check_prepared(prepared, table, clickhouse.target(), slot);
+        log::info("ClickHouse target {} (uuid {}){}.", clickhouse.target(), prepared.table_identity,
+                  prepared.created ? ", created" : "");
+        log::warn("Writes to ClickHouse are not available yet; writing JSON Lines to stdout.");
+    }
+
     pg::ReplicationConnection conn(pg::build_connection_params(config_.source.conninfo.value,
                                                                pg::ConnectionKind::Replication));
     const pg::SystemIdentity identity = conn.identify_system();
     log::info("Connected to system {} (timeline {}, WAL at {}); streaming from slot '{}' via publication '{}'.",
               identity.system_id, identity.timeline, core::format_lsn(identity.xlogpos), slot, publication);
 
-    if (config_.output.sink.value == config::SinkKind::ClickHouse) {
-        log::warn("The ClickHouse sink is not available yet; writing JSON Lines to stdout.");
-    }
     sink::jsonl::JsonlSink sink;
     sink.prepare(table);
     StreamState state{core::TransactionAssembler{}, sink,
