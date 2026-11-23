@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -142,11 +143,11 @@ PrepareResult ClickHouseSink::prepare(const core::TableSchema& source) {
     }
 }
 
-void ClickHouseSink::insert(const ch::Block& block) {
-    // The write is idempotent (decision 2.2), so the same Block is retried.
+void ClickHouseSink::with_retry(const std::function<void()>& write) {
+    // Writes are idempotent (decision 2.2): the same Block or statement is retried.
     while (true) {
         try {
-            client_.Insert(target(), block);
+            write();
             backoff_.success();
             return;
         } catch (const TransientError& e) {
@@ -156,21 +157,30 @@ void ClickHouseSink::insert(const ch::Block& block) {
     }
 }
 
+void ClickHouseSink::write_rows() {
+    if (rows_->rows() == 0) return;
+    const std::size_t rows = rows_->rows();
+    const ch::Block block = rows_->take();
+    with_retry([&] { client_.Insert(target(), block); });
+    log::debug("Wrote {} rows to {}.", rows, target());
+}
+
 std::optional<core::Lsn> ClickHouseSink::flush(bool include_open) {
     if (!rows_) throw std::logic_error("ClickHouseSink::flush before prepare");
     TxBuffer::Drained drained = buffer_.drain(include_open);
     for (const auto& event : drained.events) {
-        if (event.op == core::Op::Truncate) {
-            log::warn("TRUNCATE of {} at {} is not applied to ClickHouse yet.", event.table, event.version.str());
+        if (event.op != core::Op::Truncate) {
+            rows_->add(event);
             continue;
         }
-        rows_->add(event);
+        if (event.schema_name != source_.schema || event.table != source_.name) continue;  // decision 4.4
+        // At its stream position (decisions 2.5 and 9.4): the rows before it
+        // are written first, the rows after it go into the next block.
+        write_rows();
+        with_retry([&] { client_.Execute("TRUNCATE TABLE " + target()); });
+        log::info("Truncated {} (TRUNCATE of {} at {}).", target(), source_.qualified(), event.version.str());
     }
-    if (rows_->rows() > 0) {
-        const std::size_t rows = rows_->rows();
-        insert(rows_->take());
-        log::debug("Wrote {} rows to {}.", rows, target());
-    }
+    write_rows();
     return drained.last_commit_end;
 }
 
