@@ -1,8 +1,13 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#include "core/change_event.hpp"
+#include "core/table_schema.hpp"
 
 // The query-connection side of a DBLog chunk (decision 5.2), as an interface so
 // that the snapshot runner can be tested without a server.
@@ -36,6 +41,23 @@ inline std::optional<Watermark> parse_watermark(std::string_view content) {
                      std::string(content.substr(colon + 1))};
 }
 
+// One chunk SELECT (decisions 5.2 and 5.3). Keys are primary-key values in
+// index order, as text.
+struct ChunkRequest {
+    std::vector<std::string> after;               // exclusive lower bound; empty: from the start
+    std::optional<std::vector<std::string>> upto;  // inclusive upper bound (max_pk)
+    // The first chunk of a snapshot: read the largest key in the same
+    // transaction and use it as `upto`.
+    bool read_max = false;
+    std::size_t limit = 1000;
+};
+
+struct ChunkResult {
+    std::string snapshot;                            // pg_current_snapshot() of the transaction
+    std::optional<std::vector<std::string>> max_pk;  // with read_max; nullopt for an empty table
+    std::vector<core::Row> rows;                     // in primary-key order, all columns
+};
+
 class SnapshotQueries {
 public:
     virtual ~SnapshotQueries() = default;
@@ -43,6 +65,13 @@ public:
     // Writes a transactional logical message with kWatermarkPrefix in its own
     // autocommit transaction; it appears in the stream at its commit position.
     virtual void emit_watermark(const Watermark& mark) = 0;
+
+    // Reads one chunk of `table` in a REPEATABLE READ READ ONLY transaction,
+    // together with the transaction's snapshot. Without an upper bound and
+    // without read_max (a snapshot of an empty table) no rows are read. Throws
+    // SchemaChangeError if the result columns differ from `table`
+    // (decision 7.2).
+    virtual ChunkResult select_chunk(const core::TableSchema& table, const ChunkRequest& request) = 0;
 };
 
 }  // namespace recordflow::pg

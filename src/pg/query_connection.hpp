@@ -20,6 +20,7 @@ struct QueryResult {
     std::vector<std::string> column_names;
     std::vector<std::uint32_t> column_types;
     std::vector<std::int32_t> column_mods;
+    std::vector<std::uint32_t> column_tables;  // PQftable: OID of the column's table, 0 for expressions
     std::vector<std::vector<std::optional<std::string>>> rows;
 
     std::size_t size() const { return rows.size(); }
@@ -48,11 +49,20 @@ public:
     // in autocommit (decision 5.2).
     void emit_watermark(const Watermark& mark) override;
 
+    // BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; pg_current_snapshot();
+    // with read_max `ORDER BY pk DESC LIMIT 1`; then
+    // `SELECT * ... WHERE (pk) > ($after) AND (pk) <= ($upto) ORDER BY pk LIMIT n`.
+    ChunkResult select_chunk(const core::TableSchema& table, const ChunkRequest& request) override;
+
     // Drops the connection; the next call reconnects.
     void reset();
 
 private:
     void ensure_connected();
+    // ROLLBACK if a transaction is open on a live connection; errors ignored.
+    void rollback_quietly() noexcept;
+    // Result columns against the known schema; SchemaChangeError on a difference.
+    void check_chunk_columns(const core::TableSchema& table, const QueryResult& rows);
 
     KeyValues params_;
     pg_conn* conn_ = nullptr;
